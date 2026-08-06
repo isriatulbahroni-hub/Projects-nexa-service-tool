@@ -58,6 +58,16 @@ from core.file_explorer import (
 from core.mirror import ScreenMirror, send_tap, send_swipe, send_key
 from core.backup import backup_device, restore_device
 from core.security_check import run_security_check
+from core.firmware import (
+    get_build_info,
+    list_fastboot_devices,
+    flash_partition,
+    reboot_from_fastboot,
+    COMMON_PARTITIONS,
+    CRITICAL_PARTITIONS,
+    FastbootError,
+)
+from core.network_info import get_network_info
 
 
 STYLESHEET = """
@@ -313,9 +323,10 @@ class MainWindow(QMainWindow):
             ("files", "File Explorer"),
             ("mirror", "Screen Mirror"),
             ("backup", "Backup & Restore"),
+            ("network", "Network & IMEI"),
             ("logs", "Live Logs"),
             ("history", "Service History"),
-            ("firmware", "Firmware"),
+            ("firmware", "Firmware & Flash"),
         ]
 
         for key, label in nav_items:
@@ -343,11 +354,10 @@ class MainWindow(QMainWindow):
         self.files_page = self.create_files_page()
         self.mirror_page = self.create_mirror_page()
         self.backup_page = self.create_backup_page()
+        self.network_page = self.create_network_page()
         self.logs_page = self.create_logs_page()
         self.history_page = self.create_history_page()
-        self.firmware_page = self.create_placeholder_page(
-            "Firmware", "Fitur flashing/firmware akan segera hadir."
-        )
+        self.firmware_page = self.create_firmware_page()
 
         self.pages.addWidget(self.dashboard_page)
         self.pages.addWidget(self.device_page)
@@ -357,6 +367,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.files_page)
         self.pages.addWidget(self.mirror_page)
         self.pages.addWidget(self.backup_page)
+        self.pages.addWidget(self.network_page)
         self.pages.addWidget(self.logs_page)
         self.pages.addWidget(self.history_page)
         self.pages.addWidget(self.firmware_page)
@@ -370,6 +381,7 @@ class MainWindow(QMainWindow):
             "files": self.files_page,
             "mirror": self.mirror_page,
             "backup": self.backup_page,
+            "network": self.network_page,
             "logs": self.logs_page,
             "history": self.history_page,
             "firmware": self.firmware_page,
@@ -399,6 +411,10 @@ class MainWindow(QMainWindow):
             self.refresh_file_list()
         elif key == "security":
             self.refresh_security_check()
+        elif key == "network":
+            self.refresh_network_info()
+        elif key == "firmware":
+            self.refresh_firmware_info()
 
     # ------------------------------------------------------------------
     # Dashboard Page
@@ -1670,6 +1686,280 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.backup_log.appendPlainText(f"Restore gagal: {exc}")
             QMessageBox.critical(self, "Restore Gagal", str(exc))
+
+    # ------------------------------------------------------------------
+    # Network & IMEI Page
+    # ------------------------------------------------------------------
+
+    def create_network_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(14)
+
+        title = QLabel("Network & IMEI")
+        title.setObjectName("contentTitle")
+
+        desc = QLabel("Informasi IMEI, status WiFi/data seluler, IP, dan operator.")
+        desc.setObjectName("muted")
+
+        layout.addWidget(title)
+        layout.addWidget(desc)
+
+        card = QFrame()
+        card.setObjectName("card")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(22, 20, 22, 20)
+        card_layout.setSpacing(9)
+
+        self.network_status = QLabel("Checking...")
+        self.network_status.setObjectName("status")
+
+        self.network_info_label = QLabel("")
+        self.network_info_label.setObjectName("value")
+        self.network_info_label.setWordWrap(True)
+
+        card_layout.addWidget(self.network_status)
+        card_layout.addWidget(self.network_info_label)
+
+        layout.addWidget(card)
+
+        self.network_refresh_button = QPushButton("Refresh Network Info")
+        self.network_refresh_button.setObjectName("actionPrimary")
+        self.network_refresh_button.clicked.connect(self.refresh_network_info)
+
+        layout.addWidget(self.network_refresh_button)
+        layout.addStretch()
+
+        return page
+
+    def refresh_network_info(self):
+        if not self.current_device:
+            self.network_status.setText("? No device connected")
+            self.network_info_label.setText("Hubungkan device terlebih dahulu.")
+            return
+
+        try:
+            info = get_network_info(self.current_device.serial)
+
+            self.network_status.setText("? Network Info OK")
+            self.network_info_label.setText(
+                f"IMEI              : {info.imei}\n"
+                f"WiFi              : {info.wifi_state}\n"
+                f"Mobile Data       : {info.mobile_data_state}\n"
+                f"IP Address        : {info.ip_address}\n"
+                f"Network Operator  : {info.network_operator}\n"
+                f"SIM State         : {info.sim_state}\n"
+                f"Phone Type        : {info.phone_type}"
+            )
+        except ADBError as exc:
+            self.network_status.setText("? Gagal membaca network info")
+            self.network_info_label.setText(str(exc))
+
+    # ------------------------------------------------------------------
+    # Firmware & Flash Page
+    # ------------------------------------------------------------------
+
+    def create_firmware_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(14)
+
+        title = QLabel("Firmware & Flash")
+        title.setObjectName("contentTitle")
+
+        desc = QLabel(
+            "Info build firmware saat ini, dan flash partition via Fastboot. "
+            "Fitur flashing hanya aktif saat device dalam mode Bootloader."
+        )
+        desc.setObjectName("muted")
+        desc.setWordWrap(True)
+
+        layout.addWidget(title)
+        layout.addWidget(desc)
+
+        card = QFrame()
+        card.setObjectName("card")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(22, 20, 22, 20)
+        card_layout.setSpacing(9)
+
+        self.firmware_status = QLabel("Checking...")
+        self.firmware_status.setObjectName("status")
+
+        self.firmware_info_label = QLabel("")
+        self.firmware_info_label.setObjectName("value")
+
+        card_layout.addWidget(self.firmware_status)
+        card_layout.addWidget(self.firmware_info_label)
+
+        layout.addWidget(card)
+
+        self.firmware_refresh_button = QPushButton("Refresh Build Info")
+        self.firmware_refresh_button.setObjectName("action")
+        self.firmware_refresh_button.clicked.connect(self.refresh_firmware_info)
+        layout.addWidget(self.firmware_refresh_button)
+
+        # --- Fastboot Flash Section ---
+        flash_card = QFrame()
+        flash_card.setObjectName("card")
+        flash_layout = QVBoxLayout(flash_card)
+        flash_layout.setContentsMargins(22, 20, 22, 20)
+        flash_layout.setSpacing(10)
+
+        flash_title = QLabel("Flash Partition (Fastboot Mode)")
+        flash_title.setObjectName("cardTitle")
+
+        flash_warning = QLabel(
+            "PERINGATAN: Flash partition yang salah dapat menyebabkan device "
+            "bootloop atau mati total (bricked). Pastikan file image sesuai "
+            "dengan model device dan partition target."
+        )
+        flash_warning.setObjectName("value")
+        flash_warning.setWordWrap(True)
+        flash_warning.setStyleSheet("color:#ff6b6b;")
+
+        flash_layout.addWidget(flash_title)
+        flash_layout.addWidget(flash_warning)
+
+        self.firmware_reboot_bootloader_button = QPushButton(
+            "Reboot ke Bootloader"
+        )
+        self.firmware_reboot_bootloader_button.setObjectName("action")
+        self.firmware_reboot_bootloader_button.clicked.connect(
+            lambda: self.confirm_reboot("bootloader")
+        )
+        flash_layout.addWidget(self.firmware_reboot_bootloader_button)
+
+        partition_row = QHBoxLayout()
+        partition_row.setSpacing(8)
+
+        self.firmware_partition_combo = QComboBox()
+        self.firmware_partition_combo.addItems(COMMON_PARTITIONS)
+        self.firmware_partition_combo.setObjectName("deviceSelector")
+
+        self.firmware_select_image_button = QPushButton("Pilih File Image...")
+        self.firmware_select_image_button.setObjectName("action")
+        self.firmware_select_image_button.clicked.connect(self.select_firmware_image)
+
+        partition_row.addWidget(self.firmware_partition_combo)
+        partition_row.addWidget(self.firmware_select_image_button)
+
+        flash_layout.addLayout(partition_row)
+
+        self.firmware_image_path_label = QLabel("Belum ada file dipilih.")
+        self.firmware_image_path_label.setObjectName("value")
+        self.firmware_image_path_label.setWordWrap(True)
+        flash_layout.addWidget(self.firmware_image_path_label)
+
+        self.firmware_flash_button = QPushButton("Flash Partition Sekarang")
+        self.firmware_flash_button.setObjectName("actionDanger")
+        self.firmware_flash_button.clicked.connect(self.run_flash_partition)
+        flash_layout.addWidget(self.firmware_flash_button)
+
+        self.firmware_flash_log = QPlainTextEdit()
+        self.firmware_flash_log.setObjectName("logConsole")
+        self.firmware_flash_log.setReadOnly(True)
+        self.firmware_flash_log.setFixedHeight(140)
+        flash_layout.addWidget(self.firmware_flash_log)
+
+        layout.addWidget(flash_card)
+        layout.addStretch()
+
+        self._firmware_image_path = None
+
+        return page
+
+    def refresh_firmware_info(self):
+        if not self.current_device:
+            self.firmware_status.setText("? No device connected")
+            self.firmware_info_label.setText(
+                "Hubungkan device (mode normal) untuk melihat info build."
+            )
+            return
+
+        try:
+            info = get_build_info(self.current_device.serial)
+
+            self.firmware_status.setText("? Build Info OK")
+            self.firmware_info_label.setText(
+                f"Android Version   : {info.android_version}\n"
+                f"Build ID          : {info.build_id}\n"
+                f"Security Patch    : {info.security_patch}\n"
+                f"Baseband Version  : {info.baseband_version}\n"
+                f"Bootloader        : {info.bootloader_version}\n"
+                f"Build Date        : {info.build_date}\n"
+                f"Fingerprint       : {info.build_fingerprint}"
+            )
+        except ADBError as exc:
+            self.firmware_status.setText("? Gagal membaca build info")
+            self.firmware_info_label.setText(str(exc))
+
+    def select_firmware_image(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Pilih file image (.img)", "", "Image Files (*.img);;All Files (*)"
+        )
+
+        if file_path:
+            self._firmware_image_path = file_path
+            self.firmware_image_path_label.setText(f"File dipilih: {file_path}")
+
+    def run_flash_partition(self):
+        if not self._firmware_image_path:
+            QMessageBox.warning(
+                self, "Belum pilih file", "Pilih file image (.img) terlebih dahulu."
+            )
+            return
+
+        partition = self.firmware_partition_combo.currentText()
+
+        try:
+            fastboot_devices = list_fastboot_devices()
+        except FastbootError as exc:
+            QMessageBox.critical(
+                self, "Fastboot Tidak Terdeteksi",
+                f"{exc}\n\nPastikan device dalam mode Bootloader dan terhubung."
+            )
+            return
+
+        if not fastboot_devices:
+            QMessageBox.warning(
+                self, "Device Tidak Terdeteksi",
+                "Tidak ada device dalam mode Fastboot/Bootloader.\n\n"
+                "Klik 'Reboot ke Bootloader' terlebih dahulu."
+            )
+            return
+
+        reply = QMessageBox.question(
+            self, "Konfirmasi Flash - RISIKO TINGGI",
+            f"Anda akan flash partition '{partition}' dengan file:\n"
+            f"{self._firmware_image_path}\n\n"
+            f"Tindakan ini BERISIKO membuat device tidak bisa boot jika "
+            f"file tidak sesuai. Lanjutkan?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        serial = fastboot_devices[0]
+
+        self.firmware_flash_log.appendPlainText(
+            f"Flashing '{partition}' pada device {serial}..."
+        )
+        QApplication.processEvents()
+
+        try:
+            output = flash_partition(partition, self._firmware_image_path, serial=serial)
+            self.firmware_flash_log.appendPlainText(output or "Flash selesai.")
+            self.firmware_flash_log.appendPlainText("--- SELESAI ---")
+            QMessageBox.information(
+                self, "Flash Berhasil", f"Partition '{partition}' berhasil diflash."
+            )
+        except FastbootError as exc:
+            self.firmware_flash_log.appendPlainText(f"ERROR: {exc}")
+            QMessageBox.critical(self, "Flash Gagal", str(exc))
 
     # ------------------------------------------------------------------
     # Placeholder Page
