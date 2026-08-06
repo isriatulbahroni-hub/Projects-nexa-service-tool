@@ -68,6 +68,7 @@ from core.firmware import (
     FastbootError,
 )
 from core.network_info import get_network_info
+from core.hardware_test import run_hardware_test
 
 
 STYLESHEET = """
@@ -327,6 +328,7 @@ class MainWindow(QMainWindow):
             ("logs", "Live Logs"),
             ("history", "Service History"),
             ("firmware", "Firmware & Flash"),
+            ("hardware", "Hardware Test"),
         ]
 
         for key, label in nav_items:
@@ -358,6 +360,7 @@ class MainWindow(QMainWindow):
         self.logs_page = self.create_logs_page()
         self.history_page = self.create_history_page()
         self.firmware_page = self.create_firmware_page()
+        self.hardware_page = self.create_hardware_test_page()
 
         self.pages.addWidget(self.dashboard_page)
         self.pages.addWidget(self.device_page)
@@ -371,6 +374,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.logs_page)
         self.pages.addWidget(self.history_page)
         self.pages.addWidget(self.firmware_page)
+        self.pages.addWidget(self.hardware_page)
 
         self.page_widgets = {
             "dashboard": self.dashboard_page,
@@ -385,6 +389,7 @@ class MainWindow(QMainWindow):
             "logs": self.logs_page,
             "history": self.history_page,
             "firmware": self.firmware_page,
+            "hardware": self.hardware_page,
         }
 
         root_layout.addWidget(sidebar)
@@ -415,6 +420,8 @@ class MainWindow(QMainWindow):
             self.refresh_network_info()
         elif key == "firmware":
             self.refresh_firmware_info()
+        elif key == "hardware":
+            self.refresh_hardware_test_status()
 
     # ------------------------------------------------------------------
     # Dashboard Page
@@ -500,6 +507,93 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
         return page
+
+    # ------------------------------------------------------------------
+    # Hardware Test Page
+    # ------------------------------------------------------------------
+
+    def create_hardware_test_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(16)
+
+        title = QLabel("Hardware Test")
+        title.setObjectName("contentTitle")
+        desc = QLabel("Safe, read-only checks for the connected Android device.")
+        desc.setObjectName("muted")
+        layout.addWidget(title)
+        layout.addWidget(desc)
+
+        summary = QFrame()
+        summary.setObjectName("card")
+        summary_layout = QHBoxLayout(summary)
+        summary_layout.setContentsMargins(20, 16, 20, 16)
+        self.hardware_score = QLabel("-- / 100")
+        self.hardware_score.setObjectName("scoreBig")
+        self.hardware_summary = QLabel("Run a full hardware test to collect a report.")
+        self.hardware_summary.setObjectName("value")
+        summary_layout.addWidget(self.hardware_score)
+        summary_layout.addWidget(self.hardware_summary, 1)
+        layout.addWidget(summary)
+
+        actions = QHBoxLayout()
+        self.hardware_run_button = QPushButton("RUN FULL HARDWARE TEST")
+        self.hardware_run_button.setObjectName("actionPrimary")
+        self.hardware_run_button.clicked.connect(self.run_full_hardware_test)
+        self.hardware_refresh_button = QPushButton("Refresh")
+        self.hardware_refresh_button.setObjectName("action")
+        self.hardware_refresh_button.clicked.connect(self.refresh_hardware_test_status)
+        actions.addWidget(self.hardware_run_button)
+        actions.addWidget(self.hardware_refresh_button)
+        actions.addStretch()
+        layout.addLayout(actions)
+
+        self.hardware_table = QTableWidget(0, 4)
+        self.hardware_table.setHorizontalHeaderLabels(["Check", "Status", "Value", "Detail"])
+        self.hardware_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.hardware_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.hardware_table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.hardware_table, 1)
+
+        warning = QLabel("Read-only diagnostics: camera, speaker, microphone, sensors, fingerprint and touchscreen still require physical interaction tests.")
+        warning.setObjectName("muted")
+        warning.setWordWrap(True)
+        layout.addWidget(warning)
+        return page
+
+    def refresh_hardware_test_status(self):
+        if not self.current_serial:
+            self.hardware_score.setText("-- / 100")
+            self.hardware_summary.setText("No authorized ADB device connected.")
+            self.hardware_run_button.setEnabled(False)
+            self.hardware_table.setRowCount(0)
+            return
+        self.hardware_run_button.setEnabled(True)
+        self.hardware_summary.setText(f"Ready: {self.current_serial}")
+
+    def run_full_hardware_test(self):
+        if not self.current_serial:
+            QMessageBox.warning(self, "No Device", "Connect and authorize an Android device first.")
+            return
+        self.hardware_run_button.setEnabled(False)
+        QApplication.processEvents()
+        try:
+            report = run_hardware_test(self.current_serial)
+            self.hardware_score.setText(f"{report.score} / 100")
+            self.hardware_summary.setText(
+                f"PASS {report.passed}  |  WARN {report.warnings}  |  FAIL {report.failed}"
+            )
+            self.hardware_table.setRowCount(len(report.results))
+            for row, item in enumerate(report.results):
+                values = [item.name, item.status, item.value, item.detail]
+                for col, value in enumerate(values):
+                    self.hardware_table.setItem(row, col, QTableWidgetItem(str(value)))
+            self.last_hardware_report = report
+        except Exception as exc:
+            QMessageBox.critical(self, "Hardware Test Error", str(exc))
+        finally:
+            self.hardware_run_button.setEnabled(True)
 
     # ------------------------------------------------------------------
     # Device Page
