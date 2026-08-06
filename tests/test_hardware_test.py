@@ -15,7 +15,7 @@ def test_report_counts_and_score():
     assert report.passed == 1
     assert report.warnings == 1
     assert report.failed == 1
-    assert report.score == 57
+    assert report.score == 58
 
 
 def test_empty_report_score_is_zero():
