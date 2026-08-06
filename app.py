@@ -2,13 +2,18 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -24,7 +29,8 @@ from PySide6.QtWidgets import (
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from core.adb import ADBError, get_devices_with_state, reboot_device
+from core.adb import ADBError, get_devices_with_state, reboot_device, run_adb
+from core.config import ADB_PATH
 from core.device import get_device_info
 from core.diagnostics import (
     compute_health_score,
@@ -34,6 +40,24 @@ from core.diagnostics import (
 from core.database import get_history, save_service_record
 from core.logcat import LogcatStreamer
 from core.report import generate_service_report
+from core.packages import (
+    list_packages,
+    install_apk,
+    uninstall_package,
+    force_stop,
+    clear_app_data,
+)
+from core.file_explorer import (
+    list_dir,
+    normalize_path,
+    go_up,
+    pull_file,
+    push_file,
+    delete_remote,
+)
+from core.mirror import ScreenMirror, send_tap, send_swipe, send_key
+from core.backup import backup_device, restore_device
+from core.security_check import run_security_check
 
 
 STYLESHEET = """
@@ -226,6 +250,8 @@ class MainWindow(QMainWindow):
         self.last_recommendations: list[str] = []
 
         self.logcat_streamer: LogcatStreamer | None = None
+        self.screen_mirror: ScreenMirror | None = None
+        self.file_explorer_path = "/sdcard"
 
         self.setStyleSheet(STYLESHEET)
 
@@ -282,6 +308,11 @@ class MainWindow(QMainWindow):
             ("dashboard", "Dashboard"),
             ("device", "Device"),
             ("diagnostics", "Diagnostics"),
+            ("security", "Security Check"),
+            ("apps", "App Manager"),
+            ("files", "File Explorer"),
+            ("mirror", "Screen Mirror"),
+            ("backup", "Backup & Restore"),
             ("logs", "Live Logs"),
             ("history", "Service History"),
             ("firmware", "Firmware"),
@@ -307,6 +338,11 @@ class MainWindow(QMainWindow):
         self.dashboard_page = self.create_dashboard_page()
         self.device_page = self.create_device_page()
         self.diagnostics_page = self.create_diagnostics_page()
+        self.security_page = self.create_security_page()
+        self.apps_page = self.create_apps_page()
+        self.files_page = self.create_files_page()
+        self.mirror_page = self.create_mirror_page()
+        self.backup_page = self.create_backup_page()
         self.logs_page = self.create_logs_page()
         self.history_page = self.create_history_page()
         self.firmware_page = self.create_placeholder_page(
@@ -316,6 +352,11 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.dashboard_page)
         self.pages.addWidget(self.device_page)
         self.pages.addWidget(self.diagnostics_page)
+        self.pages.addWidget(self.security_page)
+        self.pages.addWidget(self.apps_page)
+        self.pages.addWidget(self.files_page)
+        self.pages.addWidget(self.mirror_page)
+        self.pages.addWidget(self.backup_page)
         self.pages.addWidget(self.logs_page)
         self.pages.addWidget(self.history_page)
         self.pages.addWidget(self.firmware_page)
@@ -324,6 +365,11 @@ class MainWindow(QMainWindow):
             "dashboard": self.dashboard_page,
             "device": self.device_page,
             "diagnostics": self.diagnostics_page,
+            "security": self.security_page,
+            "apps": self.apps_page,
+            "files": self.files_page,
+            "mirror": self.mirror_page,
+            "backup": self.backup_page,
             "logs": self.logs_page,
             "history": self.history_page,
             "firmware": self.firmware_page,
@@ -340,10 +386,19 @@ class MainWindow(QMainWindow):
         for k, btn in self.nav_buttons.items():
             btn.setChecked(k == key)
 
+        if key != "mirror" and self.screen_mirror and self.screen_mirror.is_running():
+            self.stop_mirror()
+
         self.pages.setCurrentWidget(self.page_widgets[key])
 
         if key == "history":
             self.refresh_history_table()
+        elif key == "apps":
+            self.refresh_apps_list()
+        elif key == "files":
+            self.refresh_file_list()
+        elif key == "security":
+            self.refresh_security_check()
 
     # ------------------------------------------------------------------
     # Dashboard Page
@@ -911,6 +966,712 @@ class MainWindow(QMainWindow):
                 self.history_table.setItem(row_idx, col_idx, item)
 
     # ------------------------------------------------------------------
+    # Security Check Page
+    # ------------------------------------------------------------------
+
+    def create_security_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(14)
+
+        title = QLabel("Security Check")
+        title.setObjectName("contentTitle")
+
+        desc = QLabel("Auto-detect root, status bootloader, dan patch keamanan.")
+        desc.setObjectName("muted")
+
+        layout.addWidget(title)
+        layout.addWidget(desc)
+
+        card = QFrame()
+        card.setObjectName("card")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(22, 20, 22, 20)
+        card_layout.setSpacing(9)
+
+        self.security_status = QLabel("Checking...")
+        self.security_status.setObjectName("status")
+
+        self.security_info = QLabel("")
+        self.security_info.setObjectName("value")
+
+        card_layout.addWidget(self.security_status)
+        card_layout.addWidget(self.security_info)
+
+        layout.addWidget(card)
+
+        warn_card = QFrame()
+        warn_card.setObjectName("card")
+        warn_layout = QVBoxLayout(warn_card)
+        warn_layout.setContentsMargins(22, 20, 22, 20)
+        warn_layout.setSpacing(8)
+
+        warn_title = QLabel("Peringatan & Rekomendasi")
+        warn_title.setObjectName("cardTitle")
+
+        self.security_warnings = QTextEdit()
+        self.security_warnings.setObjectName("value")
+        self.security_warnings.setReadOnly(True)
+        self.security_warnings.setFixedHeight(150)
+
+        warn_layout.addWidget(warn_title)
+        warn_layout.addWidget(self.security_warnings)
+
+        layout.addWidget(warn_card)
+
+        self.security_refresh_button = QPushButton("Jalankan Security Check")
+        self.security_refresh_button.setObjectName("actionPrimary")
+        self.security_refresh_button.clicked.connect(self.refresh_security_check)
+
+        layout.addWidget(self.security_refresh_button)
+        layout.addStretch()
+
+        return page
+
+    def refresh_security_check(self):
+        if not self.current_device:
+            self.security_status.setText("? No device connected")
+            self.security_info.setText("Hubungkan device terlebih dahulu.")
+            self.security_warnings.setPlainText("")
+            return
+
+        try:
+            result = run_security_check(self.current_device.serial)
+
+            root_icon = "??" if result.is_rooted else "?"
+
+            self.security_status.setText(
+                f"{root_icon} {'Rooted' if result.is_rooted else 'Not Rooted'}"
+            )
+            self.security_info.setText(
+                f"Root Indicator     : {result.root_indicator}\n"
+                f"Bootloader         : {result.bootloader_state}\n"
+                f"Verified Boot      : {result.verified_boot_state}\n"
+                f"Security Patch     : {result.security_patch}\n"
+                f"SELinux            : {result.selinux_status}"
+            )
+
+            self.security_warnings.setPlainText(
+                "\n".join(f"- {w}" for w in result.warnings)
+            )
+        except ADBError as exc:
+            self.security_status.setText("? Security check gagal")
+            self.security_info.setText(str(exc))
+            self.security_warnings.setPlainText("")
+
+    # ------------------------------------------------------------------
+    # App Manager Page
+    # ------------------------------------------------------------------
+
+    def create_apps_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(14)
+
+        title = QLabel("App Manager")
+        title.setObjectName("contentTitle")
+
+        desc = QLabel("Kelola aplikasi terinstall di device: install, uninstall, force-stop.")
+        desc.setObjectName("muted")
+
+        layout.addWidget(title)
+        layout.addWidget(desc)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+
+        self.apps_refresh_button = QPushButton("Refresh Daftar Apps")
+        self.apps_refresh_button.setObjectName("action")
+        self.apps_refresh_button.clicked.connect(self.refresh_apps_list)
+
+        self.apps_install_button = QPushButton("Install APK...")
+        self.apps_install_button.setObjectName("actionPrimary")
+        self.apps_install_button.clicked.connect(self.install_apk_dialog)
+
+        btn_row.addWidget(self.apps_refresh_button)
+        btn_row.addWidget(self.apps_install_button)
+        btn_row.addStretch()
+
+        layout.addLayout(btn_row)
+
+        self.apps_list = QListWidget()
+        layout.addWidget(self.apps_list)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(10)
+
+        self.apps_stop_button = QPushButton("Force Stop")
+        self.apps_stop_button.setObjectName("action")
+        self.apps_stop_button.clicked.connect(self.force_stop_selected_app)
+
+        self.apps_clear_button = QPushButton("Clear Data")
+        self.apps_clear_button.setObjectName("action")
+        self.apps_clear_button.clicked.connect(self.clear_data_selected_app)
+
+        self.apps_uninstall_button = QPushButton("Uninstall")
+        self.apps_uninstall_button.setObjectName("actionDanger")
+        self.apps_uninstall_button.clicked.connect(self.uninstall_selected_app)
+
+        action_row.addWidget(self.apps_stop_button)
+        action_row.addWidget(self.apps_clear_button)
+        action_row.addWidget(self.apps_uninstall_button)
+
+        layout.addLayout(action_row)
+
+        return page
+
+    def refresh_apps_list(self):
+        self.apps_list.clear()
+
+        if not self.current_device:
+            self.apps_list.addItem("Tidak ada device terhubung")
+            return
+
+        try:
+            packages = list_packages(self.current_device.serial, include_system=False)
+
+            if not packages:
+                self.apps_list.addItem("Tidak ada aplikasi pihak ketiga terdeteksi.")
+                return
+
+            for pkg in packages:
+                self.apps_list.addItem(pkg.package_name)
+        except ADBError as exc:
+            self.apps_list.addItem(f"Error: {exc}")
+
+    def _get_selected_package(self) -> str | None:
+        item = self.apps_list.currentItem()
+
+        if not item or not self.current_device:
+            return None
+
+        text = item.text()
+
+        if text.startswith("Error") or "Tidak ada" in text:
+            return None
+
+        return text
+
+    def force_stop_selected_app(self):
+        package = self._get_selected_package()
+
+        if not package:
+            QMessageBox.warning(self, "Pilih aplikasi", "Pilih aplikasi dari daftar dulu.")
+            return
+
+        try:
+            force_stop(self.current_device.serial, package)
+            QMessageBox.information(self, "Berhasil", f"{package} dihentikan paksa.")
+        except ADBError as exc:
+            QMessageBox.critical(self, "Gagal", str(exc))
+
+    def clear_data_selected_app(self):
+        package = self._get_selected_package()
+
+        if not package:
+            QMessageBox.warning(self, "Pilih aplikasi", "Pilih aplikasi dari daftar dulu.")
+            return
+
+        reply = QMessageBox.question(
+            self, "Konfirmasi",
+            f"Yakin hapus semua data aplikasi {package}?\nTindakan ini tidak bisa dibatalkan.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            clear_app_data(self.current_device.serial, package)
+            QMessageBox.information(self, "Berhasil", f"Data {package} berhasil dihapus.")
+        except ADBError as exc:
+            QMessageBox.critical(self, "Gagal", str(exc))
+
+    def uninstall_selected_app(self):
+        package = self._get_selected_package()
+
+        if not package:
+            QMessageBox.warning(self, "Pilih aplikasi", "Pilih aplikasi dari daftar dulu.")
+            return
+
+        reply = QMessageBox.question(
+            self, "Konfirmasi Uninstall",
+            f"Yakin uninstall {package} dari device ini?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            uninstall_package(self.current_device.serial, package)
+            QMessageBox.information(self, "Berhasil", f"{package} berhasil di-uninstall.")
+            self.refresh_apps_list()
+        except ADBError as exc:
+            QMessageBox.critical(self, "Gagal", str(exc))
+
+    def install_apk_dialog(self):
+        if not self.current_device:
+            QMessageBox.warning(self, "Tidak ada device", "Hubungkan device terlebih dahulu.")
+            return
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Pilih file APK", "", "APK Files (*.apk)"
+        )
+
+        if not file_path:
+            return
+
+        try:
+            install_apk(self.current_device.serial, file_path)
+            QMessageBox.information(self, "Berhasil", "APK berhasil di-install.")
+            self.refresh_apps_list()
+        except ADBError as exc:
+            QMessageBox.critical(self, "Install Gagal", str(exc))
+
+    # ------------------------------------------------------------------
+    # File Explorer Page
+    # ------------------------------------------------------------------
+
+    def create_files_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(14)
+
+        title = QLabel("File Explorer")
+        title.setObjectName("contentTitle")
+
+        desc = QLabel("Browse penyimpanan device, push/pull file via ADB.")
+        desc.setObjectName("muted")
+
+        layout.addWidget(title)
+        layout.addWidget(desc)
+
+        path_row = QHBoxLayout()
+        path_row.setSpacing(8)
+
+        self.files_path_input = QLineEdit(self.file_explorer_path)
+        self.files_path_input.returnPressed.connect(self.navigate_to_path_input)
+
+        self.files_up_button = QPushButton("Up")
+        self.files_up_button.setObjectName("action")
+        self.files_up_button.clicked.connect(self.navigate_up)
+
+        self.files_go_button = QPushButton("Go")
+        self.files_go_button.setObjectName("action")
+        self.files_go_button.clicked.connect(self.navigate_to_path_input)
+
+        path_row.addWidget(self.files_path_input)
+        path_row.addWidget(self.files_up_button)
+        path_row.addWidget(self.files_go_button)
+
+        layout.addLayout(path_row)
+
+        self.files_list = QListWidget()
+        self.files_list.itemDoubleClicked.connect(self.on_file_double_clicked)
+        layout.addWidget(self.files_list)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(10)
+
+        self.files_pull_button = QPushButton("Pull ke Laptop")
+        self.files_pull_button.setObjectName("action")
+        self.files_pull_button.clicked.connect(self.pull_selected_file)
+
+        self.files_push_button = QPushButton("Push dari Laptop")
+        self.files_push_button.setObjectName("action")
+        self.files_push_button.clicked.connect(self.push_file_dialog)
+
+        self.files_delete_button = QPushButton("Hapus")
+        self.files_delete_button.setObjectName("actionDanger")
+        self.files_delete_button.clicked.connect(self.delete_selected_file)
+
+        action_row.addWidget(self.files_pull_button)
+        action_row.addWidget(self.files_push_button)
+        action_row.addWidget(self.files_delete_button)
+
+        layout.addLayout(action_row)
+
+        return page
+
+    def refresh_file_list(self):
+        self.files_list.clear()
+        self.files_path_input.setText(self.file_explorer_path)
+
+        if not self.current_device:
+            self.files_list.addItem("Tidak ada device terhubung")
+            return
+
+        try:
+            entries = list_dir(self.current_device.serial, self.file_explorer_path)
+
+            if not entries:
+                self.files_list.addItem("(folder kosong)")
+                return
+
+            for entry in entries:
+                prefix = "[DIR] " if entry.is_dir else "      "
+                label = f"{prefix}{entry.name}" + (f"  ({entry.size})" if not entry.is_dir else "")
+                item = QListWidgetItem(label)
+                item.setData(Qt.UserRole, entry.name)
+                item.setData(Qt.UserRole + 1, entry.is_dir)
+                self.files_list.addItem(item)
+        except ADBError as exc:
+            self.files_list.addItem(f"Error: {exc}")
+
+    def navigate_to_path_input(self):
+        self.file_explorer_path = normalize_path(self.files_path_input.text())
+        self.refresh_file_list()
+
+    def navigate_up(self):
+        self.file_explorer_path = go_up(self.file_explorer_path)
+        self.refresh_file_list()
+
+    def on_file_double_clicked(self, item: QListWidgetItem):
+        is_dir = item.data(Qt.UserRole + 1)
+        name = item.data(Qt.UserRole)
+
+        if not name:
+            return
+
+        if is_dir:
+            self.file_explorer_path = normalize_path(
+                f"{self.file_explorer_path}/{name}"
+            )
+            self.refresh_file_list()
+
+    def _get_selected_file_entry(self):
+        item = self.files_list.currentItem()
+
+        if not item:
+            return None, None
+
+        name = item.data(Qt.UserRole)
+        is_dir = item.data(Qt.UserRole + 1)
+
+        return name, is_dir
+
+    def pull_selected_file(self):
+        if not self.current_device:
+            return
+
+        name, is_dir = self._get_selected_file_entry()
+
+        if not name:
+            QMessageBox.warning(self, "Pilih file", "Pilih file/folder dari daftar dulu.")
+            return
+
+        remote_path = f"{self.file_explorer_path}/{name}"
+
+        save_path, _ = QFileDialog.getSaveFileName(self, "Simpan sebagai", name)
+
+        if not save_path:
+            return
+
+        try:
+            pull_file(self.current_device.serial, remote_path, save_path)
+            QMessageBox.information(self, "Berhasil", f"File tersimpan di:\n{save_path}")
+        except ADBError as exc:
+            QMessageBox.critical(self, "Pull Gagal", str(exc))
+
+    def push_file_dialog(self):
+        if not self.current_device:
+            QMessageBox.warning(self, "Tidak ada device", "Hubungkan device terlebih dahulu.")
+            return
+
+        file_path, _ = QFileDialog.getOpenFileName(self, "Pilih file untuk di-push")
+
+        if not file_path:
+            return
+
+        file_name = Path(file_path).name
+        remote_path = f"{self.file_explorer_path}/{file_name}"
+
+        try:
+            push_file(self.current_device.serial, file_path, remote_path)
+            QMessageBox.information(self, "Berhasil", f"File terkirim ke:\n{remote_path}")
+            self.refresh_file_list()
+        except ADBError as exc:
+            QMessageBox.critical(self, "Push Gagal", str(exc))
+
+    def delete_selected_file(self):
+        if not self.current_device:
+            return
+
+        name, is_dir = self._get_selected_file_entry()
+
+        if not name:
+            QMessageBox.warning(self, "Pilih file", "Pilih file/folder dari daftar dulu.")
+            return
+
+        remote_path = f"{self.file_explorer_path}/{name}"
+
+        reply = QMessageBox.question(
+            self, "Konfirmasi Hapus",
+            f"Yakin hapus {remote_path}?\nTindakan ini tidak bisa dibatalkan.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            delete_remote(self.current_device.serial, remote_path)
+            QMessageBox.information(self, "Berhasil", "File/folder berhasil dihapus.")
+            self.refresh_file_list()
+        except ADBError as exc:
+            QMessageBox.critical(self, "Gagal", str(exc))
+
+    # ------------------------------------------------------------------
+    # Screen Mirror Page
+    # ------------------------------------------------------------------
+
+    def create_mirror_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(14)
+
+        title = QLabel("Screen Mirror")
+        title.setObjectName("contentTitle")
+
+        desc = QLabel(
+            "Preview layar device (refresh berkala) - klik gambar untuk tap, "
+            "berbasis ADB tanpa dependency tambahan."
+        )
+        desc.setObjectName("muted")
+        desc.setWordWrap(True)
+
+        layout.addWidget(title)
+        layout.addWidget(desc)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+
+        self.mirror_start_button = QPushButton("Start Mirror")
+        self.mirror_start_button.setObjectName("actionPrimary")
+        self.mirror_start_button.clicked.connect(self.start_mirror)
+
+        self.mirror_stop_button = QPushButton("Stop")
+        self.mirror_stop_button.setObjectName("actionDanger")
+        self.mirror_stop_button.clicked.connect(self.stop_mirror)
+        self.mirror_stop_button.setEnabled(False)
+
+        self.mirror_home_button = QPushButton("Home")
+        self.mirror_home_button.setObjectName("action")
+        self.mirror_home_button.clicked.connect(lambda: self._send_key_safe("KEYCODE_HOME"))
+
+        self.mirror_back_button = QPushButton("Back")
+        self.mirror_back_button.setObjectName("action")
+        self.mirror_back_button.clicked.connect(lambda: self._send_key_safe("KEYCODE_BACK"))
+
+        btn_row.addWidget(self.mirror_start_button)
+        btn_row.addWidget(self.mirror_stop_button)
+        btn_row.addWidget(self.mirror_home_button)
+        btn_row.addWidget(self.mirror_back_button)
+        btn_row.addStretch()
+
+        layout.addLayout(btn_row)
+
+        self.mirror_view = QLabel("Klik Start Mirror untuk mulai preview layar device.")
+        self.mirror_view.setObjectName("value")
+        self.mirror_view.setAlignment(Qt.AlignCenter)
+        self.mirror_view.setMinimumHeight(400)
+        self.mirror_view.setStyleSheet(
+            "background:#0a0b0e; border:1px solid #22262f; border-radius:10px;"
+        )
+        self.mirror_view.mousePressEvent = self._on_mirror_clicked
+
+        layout.addWidget(self.mirror_view)
+
+        return page
+
+    def start_mirror(self):
+        if not self.current_device:
+            QMessageBox.warning(self, "Tidak ada device", "Hubungkan device terlebih dahulu.")
+            return
+
+        if self.screen_mirror and self.screen_mirror.is_running():
+            return
+
+        self.screen_mirror = ScreenMirror(self.current_device.serial, str(ADB_PATH), self)
+        self.screen_mirror.frame_ready.connect(self._on_mirror_frame)
+        self.screen_mirror.error_occurred.connect(
+            lambda msg: self.mirror_view.setText(f"Error: {msg}")
+        )
+        self.screen_mirror.start(interval_ms=900)
+
+        self.mirror_start_button.setEnabled(False)
+        self.mirror_stop_button.setEnabled(True)
+
+    def stop_mirror(self):
+        if self.screen_mirror:
+            self.screen_mirror.stop()
+
+        self.mirror_start_button.setEnabled(True)
+        self.mirror_stop_button.setEnabled(False)
+        self.mirror_view.setText("Mirror dihentikan.")
+
+    def _on_mirror_frame(self, data: bytes):
+        pixmap = QPixmap()
+
+        if pixmap.loadFromData(data, "PNG"):
+            scaled = pixmap.scaledToHeight(560, Qt.SmoothTransformation)
+            self.mirror_view.setPixmap(scaled)
+            self._mirror_pixmap_size = scaled.size()
+            self._mirror_original_size = pixmap.size()
+
+    def _on_mirror_clicked(self, event):
+        if not self.current_device or not self.screen_mirror or not self.screen_mirror.is_running():
+            return
+
+        pixmap = self.mirror_view.pixmap()
+
+        if not pixmap or pixmap.isNull():
+            return
+
+        label_size = self.mirror_view.size()
+        pix_size = pixmap.size()
+
+        offset_x = (label_size.width() - pix_size.width()) / 2
+        offset_y = (label_size.height() - pix_size.height()) / 2
+
+        click_x = event.position().x() - offset_x
+        click_y = event.position().y() - offset_y
+
+        if click_x < 0 or click_y < 0 or click_x > pix_size.width() or click_y > pix_size.height():
+            return
+
+        scale_x = self._mirror_original_size.width() / pix_size.width()
+        scale_y = self._mirror_original_size.height() / pix_size.height()
+
+        real_x = int(click_x * scale_x)
+        real_y = int(click_y * scale_y)
+
+        try:
+            send_tap(run_adb, self.current_device.serial, real_x, real_y)
+        except ADBError:
+            pass
+
+    def _send_key_safe(self, keycode: str):
+        if not self.current_device:
+            return
+
+        try:
+            send_key(run_adb, self.current_device.serial, keycode)
+        except ADBError as exc:
+            QMessageBox.critical(self, "Gagal", str(exc))
+
+    # ------------------------------------------------------------------
+    # Backup & Restore Page
+    # ------------------------------------------------------------------
+
+    def create_backup_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(14)
+
+        title = QLabel("Backup & Restore")
+        title.setObjectName("contentTitle")
+
+        desc = QLabel(
+            "Backup folder penting (DCIM, Download, Pictures, WhatsApp) ke file ZIP, "
+            "dan restore kembali ke device."
+        )
+        desc.setObjectName("muted")
+        desc.setWordWrap(True)
+
+        layout.addWidget(title)
+        layout.addWidget(desc)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+
+        self.backup_button = QPushButton("Backup Sekarang")
+        self.backup_button.setObjectName("actionPrimary")
+        self.backup_button.clicked.connect(self.run_backup)
+
+        self.restore_button = QPushButton("Restore dari ZIP...")
+        self.restore_button.setObjectName("action")
+        self.restore_button.clicked.connect(self.run_restore)
+
+        btn_row.addWidget(self.backup_button)
+        btn_row.addWidget(self.restore_button)
+        btn_row.addStretch()
+
+        layout.addLayout(btn_row)
+
+        self.backup_log = QPlainTextEdit()
+        self.backup_log.setObjectName("logConsole")
+        self.backup_log.setReadOnly(True)
+
+        layout.addWidget(self.backup_log)
+
+        return page
+
+    def run_backup(self):
+        if not self.current_device:
+            QMessageBox.warning(self, "Tidak ada device", "Hubungkan device terlebih dahulu.")
+            return
+
+        output_dir = QFileDialog.getExistingDirectory(self, "Pilih folder tujuan backup")
+
+        if not output_dir:
+            return
+
+        self.backup_log.appendPlainText(
+            f"Memulai backup device {self.current_device.serial} - mohon tunggu..."
+        )
+        QApplication.processEvents()
+
+        try:
+            zip_path = backup_device(self.current_device.serial, Path(output_dir))
+            self.backup_log.appendPlainText(f"Backup selesai: {zip_path}")
+            QMessageBox.information(self, "Backup Selesai", f"File tersimpan di:\n{zip_path}")
+        except Exception as exc:
+            self.backup_log.appendPlainText(f"Backup gagal: {exc}")
+            QMessageBox.critical(self, "Backup Gagal", str(exc))
+
+    def run_restore(self):
+        if not self.current_device:
+            QMessageBox.warning(self, "Tidak ada device", "Hubungkan device terlebih dahulu.")
+            return
+
+        zip_path, _ = QFileDialog.getOpenFileName(
+            self, "Pilih file backup ZIP", "", "ZIP Files (*.zip)"
+        )
+
+        if not zip_path:
+            return
+
+        reply = QMessageBox.question(
+            self, "Konfirmasi Restore",
+            "Restore akan menimpa file dengan nama sama di device.\nLanjutkan?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        self.backup_log.appendPlainText(f"Memulai restore dari {zip_path} - mohon tunggu...")
+        QApplication.processEvents()
+
+        try:
+            results = restore_device(self.current_device.serial, Path(zip_path))
+
+            for line in results:
+                self.backup_log.appendPlainText(line)
+
+            QMessageBox.information(self, "Restore Selesai", "Proses restore selesai.")
+        except Exception as exc:
+            self.backup_log.appendPlainText(f"Restore gagal: {exc}")
+            QMessageBox.critical(self, "Restore Gagal", str(exc))
+
+    # ------------------------------------------------------------------
     # Placeholder Page
     # ------------------------------------------------------------------
 
@@ -1054,6 +1815,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         if self.logcat_streamer:
             self.logcat_streamer.stop()
+        if self.screen_mirror:
+            self.screen_mirror.stop()
         event.accept()
 
 
