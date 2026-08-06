@@ -1,0 +1,22 @@
+# Virtual environment
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Sensitive files
+nexapay-key*
+*.key
+*.pem
+.env
+config/secrets*
+database_url*
+*.db
+
+# Logs
+*.log
+
+# OS files
+.nomedia
+Thumbs.db
+desktop.ini
