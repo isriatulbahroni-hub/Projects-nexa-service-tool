@@ -1,0 +1,42 @@
+name: Integrate Hardware Test UI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    if: ${{ !contains(github.event.head_commit.message, '[skip hardware ui]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Integrate Hardware Test UI
+        run: python tools/integrate_hardware_ui.py
+
+      - name: Verify Python syntax
+        run: python -m py_compile app.py core/hardware_test.py
+
+      - name: Commit integration
+        run: |
+          if git diff --quiet -- app.py; then
+            echo "Hardware UI already integrated."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py
+          git commit -m "Integrate Hardware Test page [skip hardware ui]"
+          git push
