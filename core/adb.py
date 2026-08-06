@@ -53,6 +53,29 @@ def get_devices() -> list[str]:
     return devices
 
 
+def get_devices_with_state() -> dict[str, str]:
+    """
+    Mengembalikan semua device yang terdeteksi ADB beserta statusnya,
+    termasuk yang unauthorized/offline (untuk multi-device support).
+    Contoh: {"ABC123": "device", "XYZ456": "unauthorized"}
+    """
+    output = run_adb("devices")
+    devices = {}
+
+    for line in output.splitlines()[1:]:
+        line = line.strip()
+
+        if not line:
+            continue
+
+        parts = line.split()
+
+        if len(parts) >= 2:
+            devices[parts[0]] = parts[1]
+
+    return devices
+
+
 def reboot_device(serial: str, mode: str = "system") -> str:
     allowed_modes = {
         "system": (),

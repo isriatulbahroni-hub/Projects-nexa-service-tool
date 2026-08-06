@@ -13,6 +13,9 @@ config/secrets*
 database_url*
 *.db
 
+# Service history database
+data/
+
 # Logs
 *.log
 
