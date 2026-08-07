@@ -1,4 +1,4 @@
-"""Safe, explicit recovery actions for service-center workflows.
+"""Safe recovery helpers for service-center workflows.
 
 This module deliberately does not bypass screen locks, FRP, or device security.
 Destructive factory reset is not automated; the tool can prepare the device for
@@ -7,7 +7,7 @@ recovery and explain the data-loss consequences instead.
 
 from dataclasses import dataclass
 
-from .adb import ADBError, reboot_device, run_adb
+from .adb import ADBError, get_devices_with_state, reboot_device, run_adb
 
 
 @dataclass(frozen=True)
@@ -17,6 +17,15 @@ class RecoveryAction:
     risk: str
     destructive: bool
     description: str
+
+
+@dataclass(frozen=True)
+class AccessAssessment:
+    serial: str
+    adb_state: str
+    can_use_adb: bool
+    recommended_path: str
+    warning: str
 
 
 SAFE_ACTIONS = (
@@ -46,6 +55,41 @@ SAFE_ACTIONS = (
 
 def list_recovery_actions() -> tuple[RecoveryAction, ...]:
     return SAFE_ACTIONS
+
+
+def assess_access(serial: str) -> AccessAssessment:
+    """Assess ADB access without attempting to defeat the screen lock."""
+    serial = serial.strip()
+    if not serial:
+        raise ADBError("Serial perangkat wajib diisi.")
+
+    states = get_devices_with_state()
+    state = states.get(serial, "not_detected")
+
+    if state == "device":
+        return AccessAssessment(
+            serial, state, True,
+            "ADB tersedia; gunakan diagnosis read-only dan recovery resmi.",
+            "Jangan menghapus data tanpa persetujuan pemilik.",
+        )
+    if state == "unauthorized":
+        return AccessAssessment(
+            serial, state, False,
+            "Buka kunci perangkat dan setujui dialog USB debugging jika memungkinkan.",
+            "Nexa tidak dapat melewati PIN/password atau otorisasi ADB.",
+        )
+    if state == "offline":
+        return AccessAssessment(
+            serial, state, False,
+            "Periksa kabel, port USB, driver, lalu reboot ke recovery resmi bila diperlukan.",
+            "Perangkat belum menyediakan kanal ADB yang stabil.",
+        )
+
+    return AccessAssessment(
+        serial, state, False,
+        "Gunakan deteksi Fastboot/Recovery dan prosedur resmi untuk model perangkat.",
+        "Tidak ada kanal ADB aktif; screen-lock/FRP bypass tidak được hỗ trợ.",
+    )
 
 
 def reboot(serial: str, mode: str = "system") -> str:
