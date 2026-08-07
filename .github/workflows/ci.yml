@@ -28,10 +28,12 @@ jobs:
       - name: Install system libraries for Qt/PySide6
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1 libegl1
+          sudo apt-get install -y libgl1 libegl1 libxcb-xinerama0 libxkbcommon0 libxrender1
 
       - name: Compile Python modules
         run: python -m compileall -q .
 
       - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: pytest -q

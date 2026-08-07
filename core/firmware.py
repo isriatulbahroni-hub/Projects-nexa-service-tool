@@ -34,6 +34,17 @@ def run_fastboot(*args: str, timeout: int = 60) -> str:
             timeout=timeout,
             check=False,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise FastbootError("Fastboot timeout.") from exc
+    except OSError as exc:
+        raise FastbootError(f"Gagal menjalankan fastboot: {exc}") from exc
+
+    output = (result.stdout or "") + (result.stderr or "")
+
+    if result.returncode != 0:
+        raise FastbootError(output.strip() or f"Fastboot gagal, exit code {result.returncode}")
+
+    return output.strip()
 
 
 class FastbootError(RuntimeError):
@@ -67,31 +78,6 @@ def get_build_info(serial: str) -> BuildInfo:
         bootloader_version=prop("ro.bootloader"),
         build_date=prop("ro.build.date"),
     )
-
-
-def run_fastboot(*args: str, timeout: int = 60) -> str:
-    if not FASTBOOT_PATH.exists():
-        raise FastbootError(f"Fastboot tidak ditemukan: {FASTBOOT_PATH}")
-
-    try:
-        result = subprocess.run(
-            [str(FASTBOOT_PATH), *args],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise FastbootError("Fastboot timeout.") from exc
-    except OSError as exc:
-        raise FastbootError(f"Gagal menjalankan fastboot: {exc}") from exc
-
-    output = (result.stdout or "") + (result.stderr or "")
-
-    if result.returncode != 0:
-        raise FastbootError(output.strip() or f"Fastboot gagal, exit code {result.returncode}")
-
-    return output.strip()
 
 
 def list_fastboot_devices() -> list[str]:
