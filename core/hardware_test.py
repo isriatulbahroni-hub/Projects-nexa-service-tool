@@ -41,9 +41,14 @@ class HardwareTestReport:
         """Conservative score for the read-only checks we can verify remotely."""
         if not self.results:
             return 0
-        weights = {"PASS": 1.0, "INFO": 0.8, "WARN": 0.5, "FAIL": 0.0}
-        total = sum(weights.get(item.status, 0.0) for item in self.results)
-        return round(total / len(self.results) * 100)
+        # Gunakan bobot dalam skala integer (x10) supaya tidak kena galat
+        # pembulatan floating-point (mis. 57.5 yang malah jadi 57.49999...).
+        weights = {"PASS": 10, "INFO": 8, "WARN": 5, "FAIL": 0}
+        total = sum(weights.get(item.status, 0) for item in self.results)
+        # total * 10 (skala persen) dibagi (len * 10), lalu round-half-up manual.
+        numerator = total * 100
+        denominator = len(self.results) * 10
+        return (numerator + denominator // 2) // denominator
 
 
 def _shell(serial: str, *args: str, timeout: int = 10) -> str:

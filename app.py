@@ -68,6 +68,8 @@ from core.firmware import (
     FastbootError,
 )
 from core.network_info import get_network_info
+from core.service_cases import create_case, list_cases, update_status, get_timeline, STATUSES
+from core.settings import SettingsStore
 from core.hardware_test import run_hardware_test
 
 
@@ -263,6 +265,7 @@ class MainWindow(QMainWindow):
         self.logcat_streamer: LogcatStreamer | None = None
         self.screen_mirror: ScreenMirror | None = None
         self.file_explorer_path = "/sdcard"
+        self.settings_store = SettingsStore()
 
         self.setStyleSheet(STYLESHEET)
 
@@ -325,10 +328,12 @@ class MainWindow(QMainWindow):
             ("mirror", "Screen Mirror"),
             ("backup", "Backup & Restore"),
             ("network", "Network & IMEI"),
+            ("cases", "Service Cases"),
             ("logs", "Live Logs"),
             ("history", "Service History"),
-            ("firmware", "Firmware & Flash"),
             ("hardware", "Hardware Test"),
+            ("firmware", "Firmware & Flash"),
+            ("settings", "Settings"),
         ]
 
         for key, label in nav_items:
@@ -357,10 +362,12 @@ class MainWindow(QMainWindow):
         self.mirror_page = self.create_mirror_page()
         self.backup_page = self.create_backup_page()
         self.network_page = self.create_network_page()
+        self.cases_page = self.create_cases_page()
         self.logs_page = self.create_logs_page()
         self.history_page = self.create_history_page()
         self.firmware_page = self.create_firmware_page()
         self.hardware_page = self.create_hardware_test_page()
+        self.settings_page = self.create_settings_page()
 
         self.pages.addWidget(self.dashboard_page)
         self.pages.addWidget(self.device_page)
@@ -371,10 +378,12 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.mirror_page)
         self.pages.addWidget(self.backup_page)
         self.pages.addWidget(self.network_page)
+        self.pages.addWidget(self.cases_page)
         self.pages.addWidget(self.logs_page)
         self.pages.addWidget(self.history_page)
         self.pages.addWidget(self.firmware_page)
         self.pages.addWidget(self.hardware_page)
+        self.pages.addWidget(self.settings_page)
 
         self.page_widgets = {
             "dashboard": self.dashboard_page,
@@ -386,10 +395,12 @@ class MainWindow(QMainWindow):
             "mirror": self.mirror_page,
             "backup": self.backup_page,
             "network": self.network_page,
+            "cases": self.cases_page,
             "logs": self.logs_page,
             "history": self.history_page,
             "firmware": self.firmware_page,
             "hardware": self.hardware_page,
+            "settings": self.settings_page,
         }
 
         root_layout.addWidget(sidebar)
@@ -420,6 +431,8 @@ class MainWindow(QMainWindow):
             self.refresh_network_info()
         elif key == "firmware":
             self.refresh_firmware_info()
+        elif key == "cases":
+            self.refresh_cases_list()
         elif key == "hardware":
             self.refresh_hardware_test_status()
 
@@ -2054,6 +2067,230 @@ class MainWindow(QMainWindow):
         except FastbootError as exc:
             self.firmware_flash_log.appendPlainText(f"ERROR: {exc}")
             QMessageBox.critical(self, "Flash Gagal", str(exc))
+
+    # ------------------------------------------------------------------
+    # Service Cases Page
+    # ------------------------------------------------------------------
+
+    def create_cases_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(14)
+
+        title = QLabel("Service Cases")
+        title.setObjectName("contentTitle")
+
+        desc = QLabel("Kelola tiket servis: data customer, keluhan, dan status pengerjaan.")
+        desc.setObjectName("muted")
+
+        layout.addWidget(title)
+        layout.addWidget(desc)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+
+        self.cases_new_button = QPushButton("Kasus Baru")
+        self.cases_new_button.setObjectName("actionPrimary")
+        self.cases_new_button.clicked.connect(self.create_new_case_dialog)
+
+        self.cases_refresh_button = QPushButton("Refresh")
+        self.cases_refresh_button.setObjectName("action")
+        self.cases_refresh_button.clicked.connect(self.refresh_cases_list)
+
+        self.cases_advance_button = QPushButton("Ubah Status")
+        self.cases_advance_button.setObjectName("action")
+        self.cases_advance_button.clicked.connect(self.advance_case_status)
+
+        btn_row.addWidget(self.cases_new_button)
+        btn_row.addWidget(self.cases_refresh_button)
+        btn_row.addWidget(self.cases_advance_button)
+        btn_row.addStretch()
+
+        layout.addLayout(btn_row)
+
+        self.cases_table = QTableWidget(0, 6)
+        self.cases_table.setHorizontalHeaderLabels(
+            ["No. Kasus", "Customer", "Device", "Keluhan", "Status", "Update Terakhir"]
+        )
+        self.cases_table.horizontalHeader().setStretchLastSection(True)
+        self.cases_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.cases_table.setSelectionBehavior(QTableWidget.SelectRows)
+
+        layout.addWidget(self.cases_table)
+
+        return page
+
+    def refresh_cases_list(self):
+        try:
+            cases = list_cases(limit=200)
+        except Exception as exc:
+            QMessageBox.critical(self, "Gagal Memuat", str(exc))
+            return
+
+        self.cases_table.setRowCount(len(cases))
+
+        for row_idx, case in enumerate(cases):
+            values = [
+                case.case_number,
+                case.customer_name,
+                f"{case.manufacturer} {case.model}".strip() or "-",
+                case.complaint,
+                case.status,
+                case.updated_at,
+            ]
+
+            for col_idx, val in enumerate(values):
+                item = QTableWidgetItem(str(val))
+                item.setData(Qt.UserRole, case.id)
+                self.cases_table.setItem(row_idx, col_idx, item)
+
+    def create_new_case_dialog(self):
+        customer_name, ok = QInputDialog.getText(self, "Kasus Baru", "Nama customer:")
+        if not ok or not customer_name.strip():
+            return
+
+        complaint, ok = QInputDialog.getMultiLineText(self, "Kasus Baru", "Keluhan:")
+        if not ok or not complaint.strip():
+            return
+
+        phone, ok = QInputDialog.getText(self, "Kasus Baru", "No. HP customer (opsional):")
+        if not ok:
+            phone = ""
+
+        device_serial = self.current_device.serial if self.current_device else ""
+        manufacturer = self.current_device.manufacturer if self.current_device else ""
+        model = self.current_device.model if self.current_device else ""
+
+        try:
+            case = create_case(
+                customer_name=customer_name.strip(),
+                complaint=complaint.strip(),
+                customer_phone=phone.strip(),
+                device_serial=device_serial,
+                manufacturer=manufacturer,
+                model=model,
+            )
+            QMessageBox.information(
+                self, "Kasus Dibuat", f"Kasus {case.case_number} berhasil dibuat."
+            )
+            self.refresh_cases_list()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Data Tidak Valid", str(exc))
+        except Exception as exc:
+            QMessageBox.critical(self, "Gagal", str(exc))
+
+    def advance_case_status(self):
+        item = self.cases_table.currentItem()
+
+        if not item:
+            QMessageBox.warning(self, "Pilih Kasus", "Pilih baris kasus dari tabel dulu.")
+            return
+
+        row = self.cases_table.currentRow()
+        case_id = self.cases_table.item(row, 0).data(Qt.UserRole)
+
+        status, ok = QInputDialog.getItem(
+            self, "Ubah Status", "Status baru:", list(STATUSES), editable=False
+        )
+
+        if not ok:
+            return
+
+        try:
+            update_status(case_id, status)
+            self.refresh_cases_list()
+        except Exception as exc:
+            QMessageBox.critical(self, "Gagal", str(exc))
+
+    # ------------------------------------------------------------------
+    # Settings Page
+    # ------------------------------------------------------------------
+
+    def create_settings_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(14)
+
+        title = QLabel("Settings")
+        title.setObjectName("contentTitle")
+
+        desc = QLabel("Preferensi aplikasi, tersimpan otomatis ke data/settings.json.")
+        desc.setObjectName("muted")
+
+        layout.addWidget(title)
+        layout.addWidget(desc)
+
+        card = QFrame()
+        card.setObjectName("card")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(22, 20, 22, 20)
+        card_layout.setSpacing(12)
+
+        refresh_label = QLabel("Interval refresh device (ms)")
+        refresh_label.setObjectName("cardTitle")
+
+        self.settings_refresh_input = QLineEdit(
+            str(self.settings_store.get("auto_refresh_ms", 1500))
+        )
+        card_layout.addWidget(refresh_label)
+        card_layout.addWidget(self.settings_refresh_input)
+
+        self.settings_confirm_checkbox = QPushButton(
+            self._checkbox_label(
+                "Konfirmasi untuk aksi berisiko (reboot/flash/delete)",
+                self.settings_store.get("confirm_dangerous_actions", True),
+            )
+        )
+        self.settings_confirm_checkbox.setObjectName("action")
+        self.settings_confirm_checkbox.setCheckable(True)
+        self.settings_confirm_checkbox.setChecked(
+            bool(self.settings_store.get("confirm_dangerous_actions", True))
+        )
+        self.settings_confirm_checkbox.clicked.connect(self._toggle_confirm_setting)
+
+        card_layout.addWidget(self.settings_confirm_checkbox)
+        layout.addWidget(card)
+
+        self.settings_save_button = QPushButton("Simpan Settings")
+        self.settings_save_button.setObjectName("actionPrimary")
+        self.settings_save_button.clicked.connect(self.save_settings)
+
+        layout.addWidget(self.settings_save_button)
+        layout.addStretch()
+
+        return page
+
+    @staticmethod
+    def _checkbox_label(text: str, checked: bool) -> str:
+        prefix = "[x] " if checked else "[ ] "
+        return prefix + text
+
+    def _toggle_confirm_setting(self):
+        checked = self.settings_confirm_checkbox.isChecked()
+        self.settings_confirm_checkbox.setText(
+            self._checkbox_label(
+                "Konfirmasi untuk aksi berisiko (reboot/flash/delete)", checked
+            )
+        )
+
+    def save_settings(self):
+        try:
+            interval = int(self.settings_refresh_input.text().strip())
+        except ValueError:
+            QMessageBox.warning(self, "Nilai Tidak Valid", "Interval harus berupa angka.")
+            return
+
+        self.settings_store.update(
+            {
+                "auto_refresh_ms": interval,
+                "confirm_dangerous_actions": self.settings_confirm_checkbox.isChecked(),
+            }
+        )
+
+        self.timer.setInterval(interval)
+        QMessageBox.information(self, "Tersimpan", "Settings berhasil disimpan.")
 
     # ------------------------------------------------------------------
     # Placeholder Page

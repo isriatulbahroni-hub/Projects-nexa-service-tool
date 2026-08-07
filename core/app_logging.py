@@ -43,4 +43,16 @@ def configure_logging(level: int = logging.INFO) -> logging.Logger:
 def get_logger(name: str | None = None) -> logging.Logger:
     """Return a configured child logger."""
     root = configure_logging()
-    return root if not name else root.getChild(name)
+
+    if not name:
+        return root
+
+    child = root.getChild(name)
+    child.setLevel(root.level)
+
+    if not child.handlers:
+        for handler in root.handlers:
+            child.addHandler(handler)
+
+    child.propagate = False
+    return child

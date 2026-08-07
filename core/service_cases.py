@@ -126,12 +126,12 @@ def create_case(
         cur = conn.execute(
             """INSERT INTO service_cases
             (case_number, customer_name, customer_phone, device_serial, imei,
-             manufacturer, model, technician, status, estimated_cost, notes,
+             manufacturer, model, complaint, technician, status, estimated_cost, notes,
              created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Received', ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Received', ?, ?, ?, ?)""",
             (case_number, customer_name.strip(), customer_phone.strip(),
              device_serial.strip(), imei.strip(), manufacturer.strip(),
-             model.strip(), technician.strip(), float(estimated_cost),
+             model.strip(), complaint.strip(), technician.strip(), float(estimated_cost),
              notes.strip(), now, now),
         )
         case_id = cur.lastrowid

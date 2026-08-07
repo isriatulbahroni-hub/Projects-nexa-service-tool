@@ -25,7 +25,8 @@ def plan_locked_device(*, adb_state: str = "not_detected", recovery_available: b
     if state == "unauthorized":
         return RecoveryPlan(
             "unauthorized", "ADB is not authorized",
-            ("Do not attempt a lock bypass", "Use the device owner's official unlock/recovery path"),
+            ("Do not attempt to unlock or circumvent the screen lock",
+             "Use the device owner's official unlock/recovery path"),
         )
     if recovery_available or fastboot_available:
         actions = ["Use the manufacturer's official recovery procedure"]
