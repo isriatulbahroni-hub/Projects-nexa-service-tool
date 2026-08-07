@@ -467,6 +467,8 @@ class MainWindow(QMainWindow):
 
         if key == "history":
             self.refresh_history_table()
+        elif key == "diagnostics":
+            self.refresh_diagnostics()
         elif key == "apps":
             self.refresh_apps_list()
         elif key == "files":
@@ -963,7 +965,7 @@ class MainWindow(QMainWindow):
 
     def refresh_diagnostics(self):
         if not self.current_device:
-            self.diag_status.setText("? No device connected")
+            self.diag_status.setText("⚠ No device connected")
             self.diag_info.setText("Hubungkan device via USB terlebih dahulu.")
             self.diag_score_value.setText("--")
             self.diag_score_bar.setValue(0)
@@ -978,7 +980,7 @@ class MainWindow(QMainWindow):
             self.last_score = score
             self.last_recommendations = recommendations
 
-            self.diag_status.setText("? Diagnostics OK")
+            self.diag_status.setText("✅ Diagnostics OK")
             self.diag_info.setText(
                 f"Battery Level    : {diag.battery_level}\n"
                 f"Battery Status   : {diag.battery_status}\n"
@@ -1007,7 +1009,7 @@ class MainWindow(QMainWindow):
             self.dashboard_score_bar.setStyleSheet(self._score_bar_style(score))
 
         except ADBError as exc:
-            self.diag_status.setText("? Diagnostics error")
+            self.diag_status.setText("❌ Diagnostics error")
             self.diag_info.setText(str(exc))
             self.diag_score_value.setText("--")
             self.diag_score_bar.setValue(0)
@@ -1303,7 +1305,7 @@ class MainWindow(QMainWindow):
 
     def refresh_security_check(self):
         if not self.current_device:
-            self.security_status.setText("? No device connected")
+            self.security_status.setText("⚠ No device connected")
             self.security_info.setText("Hubungkan device terlebih dahulu.")
             self.security_warnings.setPlainText("")
             return
@@ -1311,7 +1313,7 @@ class MainWindow(QMainWindow):
         try:
             result = run_security_check(self.current_device.serial)
 
-            root_icon = "??" if result.is_rooted else "?"
+            root_icon = "⚠️" if result.is_rooted else "✅"
 
             self.security_status.setText(
                 f"{root_icon} {'Rooted' if result.is_rooted else 'Not Rooted'}"
@@ -1328,7 +1330,7 @@ class MainWindow(QMainWindow):
                 "\n".join(f"- {w}" for w in result.warnings)
             )
         except ADBError as exc:
-            self.security_status.setText("? Security check gagal")
+            self.security_status.setText("❌ Security check gagal")
             self.security_info.setText(str(exc))
             self.security_warnings.setPlainText("")
 
@@ -1991,14 +1993,14 @@ class MainWindow(QMainWindow):
 
     def refresh_network_info(self):
         if not self.current_device:
-            self.network_status.setText("? No device connected")
+            self.network_status.setText("⚠ No device connected")
             self.network_info_label.setText("Hubungkan device terlebih dahulu.")
             return
 
         try:
             info = get_network_info(self.current_device.serial)
 
-            self.network_status.setText("? Network Info OK")
+            self.network_status.setText("✅ Network Info OK")
             self.network_info_label.setText(
                 f"IMEI              : {info.imei}\n"
                 f"WiFi              : {info.wifi_state}\n"
@@ -2009,7 +2011,7 @@ class MainWindow(QMainWindow):
                 f"Phone Type        : {info.phone_type}"
             )
         except ADBError as exc:
-            self.network_status.setText("? Gagal membaca network info")
+            self.network_status.setText("❌ Gagal membaca network info")
             self.network_info_label.setText(str(exc))
 
     # ------------------------------------------------------------------
@@ -2129,7 +2131,7 @@ class MainWindow(QMainWindow):
 
     def refresh_firmware_info(self):
         if not self.current_device:
-            self.firmware_status.setText("? No device connected")
+            self.firmware_status.setText("⚠ No device connected")
             self.firmware_info_label.setText(
                 "Hubungkan device (mode normal) untuk melihat info build."
             )
@@ -2138,7 +2140,7 @@ class MainWindow(QMainWindow):
         try:
             info = get_build_info(self.current_device.serial)
 
-            self.firmware_status.setText("? Build Info OK")
+            self.firmware_status.setText("✅ Build Info OK")
             self.firmware_info_label.setText(
                 f"Android Version   : {info.android_version}\n"
                 f"Build ID          : {info.build_id}\n"
@@ -2149,7 +2151,7 @@ class MainWindow(QMainWindow):
                 f"Fingerprint       : {info.build_fingerprint}"
             )
         except ADBError as exc:
-            self.firmware_status.setText("? Gagal membaca build info")
+            self.firmware_status.setText("❌ Gagal membaca build info")
             self.firmware_info_label.setText(str(exc))
 
     def select_firmware_image(self):
@@ -2795,13 +2797,13 @@ class MainWindow(QMainWindow):
             device = get_device_info(self.current_serial)
             self.current_device = device
 
-            self.dashboard_status.setText("? Device connected")
+            self.dashboard_status.setText("✅ Device connected")
             self.dashboard_info.setText(
                 f"{device.manufacturer} {device.model}\n"
                 f"Android {device.android_version}"
             )
 
-            self.device_status.setText("? Connected via ADB")
+            self.device_status.setText("✅ Connected via ADB")
             self.device_info.setText(
                 f"Manufacturer : {device.manufacturer}\n"
                 f"Model        : {device.model}\n"
@@ -2822,10 +2824,10 @@ class MainWindow(QMainWindow):
     def _set_no_device(self, message: str):
         self.current_device = None
 
-        self.dashboard_status.setText("? No device connected")
+        self.dashboard_status.setText("⚠ No device connected")
         self.dashboard_info.setText(message)
 
-        self.device_status.setText("? No device connected")
+        self.device_status.setText("⚠ No device connected")
         self.device_info.setText(message)
 
         self.reboot_button.setEnabled(False)

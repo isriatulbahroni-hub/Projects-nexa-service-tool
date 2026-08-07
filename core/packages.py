@@ -11,7 +11,11 @@ class PackageInfo:
 
 def list_packages(serial: str, include_system: bool = False) -> list[PackageInfo]:
     flag = "-3" if not include_system else ""
-    args = ["-s", serial, "shell", "pm", "list", "packages"]
+    # --user 0 dipaksa eksplisit karena beberapa device (mis. yang punya
+    # Private Space / secondary user profile di Android 14+) membuat ADB
+    # shell gagal resolve "current user" dan melempar SecurityException
+    # saat mencoba mengakses user tersembunyi (mis. user 999).
+    args = ["-s", serial, "shell", "pm", "list", "packages", "--user", "0"]
 
     if flag:
         args.append(flag)
