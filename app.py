@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -68,9 +69,28 @@ from core.firmware import (
     FastbootError,
 )
 from core.network_info import get_network_info
-from core.service_cases import create_case, list_cases, update_status, get_timeline, STATUSES
-from core.settings import SettingsStore
 from core.hardware_test import run_hardware_test
+from core.task_runner import run_in_thread
+from core.app_logging import configure_logging, get_logger
+from core.settings import SettingsStore
+from core.async_worker import AsyncWorker
+from core import automation
+from core.automation import Macro, MacroStep, ACTIONS, MacroError
+from core.service_cases import (
+    STATUSES as CASE_STATUSES,
+    create_case,
+    list_cases,
+    get_case,
+    update_status as update_case_status,
+    add_note as add_case_note,
+)
+from core.recovery_actions import assess_access, factory_reset_guidance
+from core.device_access_recovery import diagnose_access_issue
+from core.locked_device_recovery import plan_locked_device
+from core.factory_reset_ui import FactoryResetAssistantPanel
+from ui.smart_diagnosis_page import SmartDiagnosisPage
+
+logger = get_logger("app")
 
 
 STYLESHEET = """
@@ -225,6 +245,20 @@ QTableWidget {
     gridline-color: #22262f;
 }
 
+QTableWidget QTableCornerButton::section {
+    background: #1a1d24;
+    border: none;
+}
+
+QTextEdit, QPlainTextEdit {
+    background: #14161c;
+    color: #d3d7de;
+    border: 1px solid #22262f;
+    border-radius: 10px;
+    padding: 8px;
+    selection-background-color: #ff5a1f;
+}
+
 QHeaderView::section {
     background: #1a1d24;
     color: #b7bdc7;
@@ -265,7 +299,11 @@ class MainWindow(QMainWindow):
         self.logcat_streamer: LogcatStreamer | None = None
         self.screen_mirror: ScreenMirror | None = None
         self.file_explorer_path = "/sdcard"
-        self.settings_store = SettingsStore()
+
+        self.settings = SettingsStore()
+        self._macro_steps: list[MacroStep] = []
+        self.current_case_id: int | None = None
+        self._hardware_task_refs = None  # keeps (thread, worker) alive while running
 
         self.setStyleSheet(STYLESHEET)
 
@@ -273,9 +311,10 @@ class MainWindow(QMainWindow):
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh_device_list)
-        self.timer.start(1500)
+        self.timer.start(int(self.settings.get("auto_refresh_ms", 1500)))
 
         self.refresh_device_list()
+        logger.info("Nexa Service Tool started")
 
     # ------------------------------------------------------------------
     # UI Construction
@@ -316,6 +355,24 @@ class MainWindow(QMainWindow):
 
         side_layout.addSpacing(20)
 
+        # Menu navigasi dibungkus QScrollArea supaya semua 18 fitur tetap
+        # bisa dijangkau walau window di-resize kecil. Sebelumnya sidebar
+        # adalah QFrame biasa (fixed height), jadi menu di bawah "Service
+        # History" (Firmware & Flash, Hardware Test, Smart Diagnosis,
+        # Service Cases, Recovery Assistant, Factory Reset, Settings)
+        # terpotong dan tidak bisa diklik sama sekali di window default.
+        nav_scroll = QScrollArea()
+        nav_scroll.setObjectName("navScroll")
+        nav_scroll.setWidgetResizable(True)
+        nav_scroll.setFrameShape(QFrame.NoFrame)
+        nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        nav_container = QWidget()
+        nav_layout = QVBoxLayout(nav_container)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(6)
+
         self.nav_buttons: dict[str, QPushButton] = {}
 
         nav_items = [
@@ -328,11 +385,15 @@ class MainWindow(QMainWindow):
             ("mirror", "Screen Mirror"),
             ("backup", "Backup & Restore"),
             ("network", "Network & IMEI"),
-            ("cases", "Service Cases"),
             ("logs", "Live Logs"),
             ("history", "Service History"),
-            ("hardware", "Hardware Test"),
             ("firmware", "Firmware & Flash"),
+            ("hardware", "Hardware Test"),
+            ("smart", "Smart Diagnosis"),
+            ("cases", "Service Cases"),
+            ("recovery", "Recovery Assistant"),
+            ("reset", "Factory Reset"),
+            ("automation", "Automation"),
             ("settings", "Settings"),
         ]
 
@@ -341,10 +402,12 @@ class MainWindow(QMainWindow):
             btn.setObjectName("navBtn")
             btn.setCheckable(True)
             btn.clicked.connect(lambda _, k=key: self.switch_page(k))
-            side_layout.addWidget(btn)
+            nav_layout.addWidget(btn)
             self.nav_buttons[key] = btn
 
-        side_layout.addStretch()
+        nav_layout.addStretch()
+        nav_scroll.setWidget(nav_container)
+        side_layout.addWidget(nav_scroll, 1)
 
         version = QLabel("Nexa Service Tool v0.2 - Smart Edition")
         version.setObjectName("subtitle")
@@ -362,11 +425,15 @@ class MainWindow(QMainWindow):
         self.mirror_page = self.create_mirror_page()
         self.backup_page = self.create_backup_page()
         self.network_page = self.create_network_page()
-        self.cases_page = self.create_cases_page()
         self.logs_page = self.create_logs_page()
         self.history_page = self.create_history_page()
         self.firmware_page = self.create_firmware_page()
         self.hardware_page = self.create_hardware_test_page()
+        self.smart_page = self.create_smart_diagnosis_page()
+        self.cases_page = self.create_service_cases_page()
+        self.recovery_page = self.create_recovery_page()
+        self.reset_page = self.create_factory_reset_page()
+        self.automation_page = self.create_automation_page()
         self.settings_page = self.create_settings_page()
 
         self.pages.addWidget(self.dashboard_page)
@@ -378,11 +445,15 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.mirror_page)
         self.pages.addWidget(self.backup_page)
         self.pages.addWidget(self.network_page)
-        self.pages.addWidget(self.cases_page)
         self.pages.addWidget(self.logs_page)
         self.pages.addWidget(self.history_page)
         self.pages.addWidget(self.firmware_page)
         self.pages.addWidget(self.hardware_page)
+        self.pages.addWidget(self.smart_page)
+        self.pages.addWidget(self.cases_page)
+        self.pages.addWidget(self.recovery_page)
+        self.pages.addWidget(self.reset_page)
+        self.pages.addWidget(self.automation_page)
         self.pages.addWidget(self.settings_page)
 
         self.page_widgets = {
@@ -395,11 +466,15 @@ class MainWindow(QMainWindow):
             "mirror": self.mirror_page,
             "backup": self.backup_page,
             "network": self.network_page,
-            "cases": self.cases_page,
             "logs": self.logs_page,
             "history": self.history_page,
             "firmware": self.firmware_page,
             "hardware": self.hardware_page,
+            "smart": self.smart_page,
+            "cases": self.cases_page,
+            "recovery": self.recovery_page,
+            "reset": self.reset_page,
+            "automation": self.automation_page,
             "settings": self.settings_page,
         }
 
@@ -421,6 +496,8 @@ class MainWindow(QMainWindow):
 
         if key == "history":
             self.refresh_history_table()
+        elif key == "diagnostics":
+            self.refresh_diagnostics()
         elif key == "apps":
             self.refresh_apps_list()
         elif key == "files":
@@ -431,10 +508,14 @@ class MainWindow(QMainWindow):
             self.refresh_network_info()
         elif key == "firmware":
             self.refresh_firmware_info()
-        elif key == "cases":
-            self.refresh_cases_list()
         elif key == "hardware":
             self.refresh_hardware_test_status()
+        elif key == "cases":
+            self.refresh_cases_table()
+        elif key == "recovery":
+            self.refresh_recovery_assessment()
+        elif key == "settings":
+            self.load_settings_form()
 
     # ------------------------------------------------------------------
     # Dashboard Page
@@ -520,6 +601,105 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
         return page
+
+    # ------------------------------------------------------------------
+    # Hardware Test Page
+    # ------------------------------------------------------------------
+
+    def create_hardware_test_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(16)
+
+        title = QLabel("Hardware Test")
+        title.setObjectName("contentTitle")
+        desc = QLabel("Safe, read-only checks for the connected Android device.")
+        desc.setObjectName("muted")
+        layout.addWidget(title)
+        layout.addWidget(desc)
+
+        summary = QFrame()
+        summary.setObjectName("card")
+        summary_layout = QHBoxLayout(summary)
+        summary_layout.setContentsMargins(20, 16, 20, 16)
+        self.hardware_score = QLabel("-- / 100")
+        self.hardware_score.setObjectName("scoreBig")
+        self.hardware_summary = QLabel("Run a full hardware test to collect a report.")
+        self.hardware_summary.setObjectName("value")
+        summary_layout.addWidget(self.hardware_score)
+        summary_layout.addWidget(self.hardware_summary, 1)
+        layout.addWidget(summary)
+
+        actions = QHBoxLayout()
+        self.hardware_run_button = QPushButton("RUN FULL HARDWARE TEST")
+        self.hardware_run_button.setObjectName("actionPrimary")
+        self.hardware_run_button.clicked.connect(self.run_full_hardware_test)
+        self.hardware_refresh_button = QPushButton("Refresh")
+        self.hardware_refresh_button.setObjectName("action")
+        self.hardware_refresh_button.clicked.connect(self.refresh_hardware_test_status)
+        actions.addWidget(self.hardware_run_button)
+        actions.addWidget(self.hardware_refresh_button)
+        actions.addStretch()
+        layout.addLayout(actions)
+
+        self.hardware_table = QTableWidget(0, 4)
+        self.hardware_table.setHorizontalHeaderLabels(["Check", "Status", "Value", "Detail"])
+        self.hardware_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.hardware_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.hardware_table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.hardware_table, 1)
+
+        warning = QLabel("Read-only diagnostics: camera, speaker, microphone, sensors, fingerprint and touchscreen still require physical interaction tests.")
+        warning.setObjectName("muted")
+        warning.setWordWrap(True)
+        layout.addWidget(warning)
+        return page
+
+    def refresh_hardware_test_status(self):
+        if not self.current_serial:
+            self.hardware_score.setText("-- / 100")
+            self.hardware_summary.setText("No authorized ADB device connected.")
+            self.hardware_run_button.setEnabled(False)
+            self.hardware_table.setRowCount(0)
+            return
+        self.hardware_run_button.setEnabled(True)
+        self.hardware_summary.setText(f"Ready: {self.current_serial}")
+
+    def run_full_hardware_test(self):
+        if not self.current_serial:
+            QMessageBox.warning(self, "No Device", "Connect and authorize an Android device first.")
+            return
+
+        self.hardware_run_button.setEnabled(False)
+        self.hardware_summary.setText("Running full hardware test...")
+
+        serial = self.current_serial
+        thread, worker = run_in_thread(self, run_hardware_test, serial)
+        self._hardware_task_refs = (thread, worker)
+
+        worker.finished.connect(self._on_hardware_test_finished)
+        worker.failed.connect(self._on_hardware_test_failed)
+
+    def _on_hardware_test_finished(self, report):
+        self.hardware_score.setText(f"{report.score} / 100")
+        self.hardware_summary.setText(
+            f"PASS {report.passed}  |  WARN {report.warnings}  |  FAIL {report.failed}"
+        )
+        self.hardware_table.setRowCount(len(report.results))
+        for row, item in enumerate(report.results):
+            values = [item.name, item.status, item.value, item.detail]
+            for col, value in enumerate(values):
+                self.hardware_table.setItem(row, col, QTableWidgetItem(str(value)))
+        self.last_hardware_report = report
+        self.hardware_run_button.setEnabled(True)
+        self._hardware_task_refs = None
+
+    def _on_hardware_test_failed(self, message: str):
+        logger.error("Hardware test failed: %s", message)
+        QMessageBox.critical(self, "Hardware Test Error", message)
+        self.hardware_run_button.setEnabled(True)
+        self._hardware_task_refs = None
 
     # ------------------------------------------------------------------
     # Hardware Test Page
@@ -814,55 +994,70 @@ class MainWindow(QMainWindow):
 
     def refresh_diagnostics(self):
         if not self.current_device:
-            self.diag_status.setText("? No device connected")
+            self.diag_status.setText("⚠ No device connected")
             self.diag_info.setText("Hubungkan device via USB terlebih dahulu.")
             self.diag_score_value.setText("--")
             self.diag_score_bar.setValue(0)
             self.diag_recommendations.setPlainText("")
             return
 
-        try:
-            diag = get_diagnostics(self.current_device.serial)
+        if getattr(self, "_diag_worker", None) and self._diag_worker.isRunning():
+            return
+
+        self.diag_status.setText("⏳ Memuat diagnostics...")
+        serial = self.current_device.serial
+
+        def task():
+            diag = get_diagnostics(serial)
             score, recommendations = compute_health_score(diag)
+            return diag, score, recommendations
 
-            self.last_diag = diag
-            self.last_score = score
-            self.last_recommendations = recommendations
+        self._diag_worker = AsyncWorker(task, self)
+        self._diag_worker.succeeded.connect(self._on_diagnostics_ready)
+        self._diag_worker.failed.connect(self._on_diagnostics_error)
+        self._diag_worker.start()
 
-            self.diag_status.setText("? Diagnostics OK")
-            self.diag_info.setText(
-                f"Battery Level    : {diag.battery_level}\n"
-                f"Battery Status   : {diag.battery_status}\n"
-                f"Battery Health   : {diag.battery_health}\n"
-                f"Storage          : {diag.storage}\n"
-                f"Screen State     : {diag.screen_state}\n"
-                f"USB Debugging    : {diag.usb_debugging}"
-            )
+    def _on_diagnostics_ready(self, result):
+        diag, score, recommendations = result
 
-            self.diag_score_value.setText(
-                f"{score}  ({health_score_label(score)})"
-            )
-            self.diag_score_bar.setValue(score)
-            self.diag_score_bar.setStyleSheet(
-                self._score_bar_style(score)
-            )
+        self.last_diag = diag
+        self.last_score = score
+        self.last_recommendations = recommendations
 
-            self.diag_recommendations.setPlainText(
-                "\n".join(f"- {r}" for r in recommendations)
-            )
+        self.diag_status.setText("✅ Diagnostics OK")
+        self.diag_info.setText(
+            f"Battery Level    : {diag.battery_level}\n"
+            f"Battery Status   : {diag.battery_status}\n"
+            f"Battery Health   : {diag.battery_health}\n"
+            f"Storage          : {diag.storage}\n"
+            f"Screen State     : {diag.screen_state}\n"
+            f"USB Debugging    : {diag.usb_debugging}"
+        )
 
-            self.dashboard_score_label.setText(
-                f"{score}/100 - {health_score_label(score)}"
-            )
-            self.dashboard_score_bar.setValue(score)
-            self.dashboard_score_bar.setStyleSheet(self._score_bar_style(score))
+        self.diag_score_value.setText(
+            f"{score}  ({health_score_label(score)})"
+        )
+        self.diag_score_bar.setValue(score)
+        self.diag_score_bar.setStyleSheet(
+            self._score_bar_style(score)
+        )
 
-        except ADBError as exc:
-            self.diag_status.setText("? Diagnostics error")
-            self.diag_info.setText(str(exc))
-            self.diag_score_value.setText("--")
-            self.diag_score_bar.setValue(0)
-            self.diag_recommendations.setPlainText("")
+        self.diag_recommendations.setPlainText(
+            "\n".join(f"- {r}" for r in recommendations)
+        )
+
+        self.dashboard_score_label.setText(
+            f"{score}/100 - {health_score_label(score)}"
+        )
+        self.dashboard_score_bar.setValue(score)
+        self.dashboard_score_bar.setStyleSheet(self._score_bar_style(score))
+
+    def _on_diagnostics_error(self, message: str):
+        self.diag_status.setText("❌ Diagnostics error")
+        self.diag_info.setText(message)
+        self.diag_score_value.setText("--")
+        self.diag_score_bar.setValue(0)
+        self.diag_recommendations.setPlainText("")
 
     @staticmethod
     def _score_bar_style(score: int) -> str:
@@ -1154,34 +1349,44 @@ class MainWindow(QMainWindow):
 
     def refresh_security_check(self):
         if not self.current_device:
-            self.security_status.setText("? No device connected")
+            self.security_status.setText("⚠ No device connected")
             self.security_info.setText("Hubungkan device terlebih dahulu.")
             self.security_warnings.setPlainText("")
             return
 
-        try:
-            result = run_security_check(self.current_device.serial)
+        if getattr(self, "_security_worker", None) and self._security_worker.isRunning():
+            return
 
-            root_icon = "??" if result.is_rooted else "?"
+        self.security_status.setText("⏳ Menjalankan security check...")
+        serial = self.current_device.serial
 
-            self.security_status.setText(
-                f"{root_icon} {'Rooted' if result.is_rooted else 'Not Rooted'}"
-            )
-            self.security_info.setText(
-                f"Root Indicator     : {result.root_indicator}\n"
-                f"Bootloader         : {result.bootloader_state}\n"
-                f"Verified Boot      : {result.verified_boot_state}\n"
-                f"Security Patch     : {result.security_patch}\n"
-                f"SELinux            : {result.selinux_status}"
-            )
+        self._security_worker = AsyncWorker(lambda: run_security_check(serial), self)
+        self._security_worker.succeeded.connect(self._on_security_ready)
+        self._security_worker.failed.connect(self._on_security_error)
+        self._security_worker.start()
 
-            self.security_warnings.setPlainText(
-                "\n".join(f"- {w}" for w in result.warnings)
-            )
-        except ADBError as exc:
-            self.security_status.setText("? Security check gagal")
-            self.security_info.setText(str(exc))
-            self.security_warnings.setPlainText("")
+    def _on_security_ready(self, result):
+        root_icon = "⚠️" if result.is_rooted else "✅"
+
+        self.security_status.setText(
+            f"{root_icon} {'Rooted' if result.is_rooted else 'Not Rooted'}"
+        )
+        self.security_info.setText(
+            f"Root Indicator     : {result.root_indicator}\n"
+            f"Bootloader         : {result.bootloader_state}\n"
+            f"Verified Boot      : {result.verified_boot_state}\n"
+            f"Security Patch     : {result.security_patch}\n"
+            f"SELinux            : {result.selinux_status}"
+        )
+
+        self.security_warnings.setPlainText(
+            "\n".join(f"- {w}" for w in result.warnings)
+        )
+
+    def _on_security_error(self, message: str):
+        self.security_status.setText("❌ Security check gagal")
+        self.security_info.setText(message)
+        self.security_warnings.setPlainText("")
 
     # ------------------------------------------------------------------
     # App Manager Page
@@ -1252,17 +1457,32 @@ class MainWindow(QMainWindow):
             self.apps_list.addItem("Tidak ada device terhubung")
             return
 
-        try:
-            packages = list_packages(self.current_device.serial, include_system=False)
+        if getattr(self, "_apps_worker", None) and self._apps_worker.isRunning():
+            return
 
-            if not packages:
-                self.apps_list.addItem("Tidak ada aplikasi pihak ketiga terdeteksi.")
-                return
+        self.apps_list.addItem("⏳ Memuat daftar aplikasi...")
+        serial = self.current_device.serial
 
-            for pkg in packages:
-                self.apps_list.addItem(pkg.package_name)
-        except ADBError as exc:
-            self.apps_list.addItem(f"Error: {exc}")
+        self._apps_worker = AsyncWorker(
+            lambda: list_packages(serial, include_system=False), self
+        )
+        self._apps_worker.succeeded.connect(self._on_apps_list_ready)
+        self._apps_worker.failed.connect(self._on_apps_list_error)
+        self._apps_worker.start()
+
+    def _on_apps_list_ready(self, packages):
+        self.apps_list.clear()
+
+        if not packages:
+            self.apps_list.addItem("Tidak ada aplikasi pihak ketiga terdeteksi.")
+            return
+
+        for pkg in packages:
+            self.apps_list.addItem(pkg.package_name)
+
+    def _on_apps_list_error(self, message: str):
+        self.apps_list.clear()
+        self.apps_list.addItem(f"Error: {message}")
 
     def _get_selected_package(self) -> str | None:
         item = self.apps_list.currentItem()
@@ -1428,22 +1648,36 @@ class MainWindow(QMainWindow):
             self.files_list.addItem("Tidak ada device terhubung")
             return
 
-        try:
-            entries = list_dir(self.current_device.serial, self.file_explorer_path)
+        if getattr(self, "_files_worker", None) and self._files_worker.isRunning():
+            return
 
-            if not entries:
-                self.files_list.addItem("(folder kosong)")
-                return
+        self.files_list.addItem("⏳ Memuat isi folder...")
+        serial = self.current_device.serial
+        path = self.file_explorer_path
 
-            for entry in entries:
-                prefix = "[DIR] " if entry.is_dir else "      "
-                label = f"{prefix}{entry.name}" + (f"  ({entry.size})" if not entry.is_dir else "")
-                item = QListWidgetItem(label)
-                item.setData(Qt.UserRole, entry.name)
-                item.setData(Qt.UserRole + 1, entry.is_dir)
-                self.files_list.addItem(item)
-        except ADBError as exc:
-            self.files_list.addItem(f"Error: {exc}")
+        self._files_worker = AsyncWorker(lambda: list_dir(serial, path), self)
+        self._files_worker.succeeded.connect(self._on_file_list_ready)
+        self._files_worker.failed.connect(self._on_file_list_error)
+        self._files_worker.start()
+
+    def _on_file_list_ready(self, entries):
+        self.files_list.clear()
+
+        if not entries:
+            self.files_list.addItem("(folder kosong)")
+            return
+
+        for entry in entries:
+            prefix = "[DIR] " if entry.is_dir else "      "
+            label = f"{prefix}{entry.name}" + (f"  ({entry.size})" if not entry.is_dir else "")
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, entry.name)
+            item.setData(Qt.UserRole + 1, entry.is_dir)
+            self.files_list.addItem(item)
+
+    def _on_file_list_error(self, message: str):
+        self.files_list.clear()
+        self.files_list.addItem(f"Error: {message}")
 
     def navigate_to_path_input(self):
         self.file_explorer_path = normalize_path(self.files_path_input.text())
@@ -1842,26 +2076,36 @@ class MainWindow(QMainWindow):
 
     def refresh_network_info(self):
         if not self.current_device:
-            self.network_status.setText("? No device connected")
+            self.network_status.setText("⚠ No device connected")
             self.network_info_label.setText("Hubungkan device terlebih dahulu.")
             return
 
-        try:
-            info = get_network_info(self.current_device.serial)
+        if getattr(self, "_network_worker", None) and self._network_worker.isRunning():
+            return
 
-            self.network_status.setText("? Network Info OK")
-            self.network_info_label.setText(
-                f"IMEI              : {info.imei}\n"
-                f"WiFi              : {info.wifi_state}\n"
-                f"Mobile Data       : {info.mobile_data_state}\n"
-                f"IP Address        : {info.ip_address}\n"
-                f"Network Operator  : {info.network_operator}\n"
-                f"SIM State         : {info.sim_state}\n"
-                f"Phone Type        : {info.phone_type}"
-            )
-        except ADBError as exc:
-            self.network_status.setText("? Gagal membaca network info")
-            self.network_info_label.setText(str(exc))
+        self.network_status.setText("⏳ Membaca network info...")
+        serial = self.current_device.serial
+
+        self._network_worker = AsyncWorker(lambda: get_network_info(serial), self)
+        self._network_worker.succeeded.connect(self._on_network_ready)
+        self._network_worker.failed.connect(self._on_network_error)
+        self._network_worker.start()
+
+    def _on_network_ready(self, info):
+        self.network_status.setText("✅ Network Info OK")
+        self.network_info_label.setText(
+            f"IMEI              : {info.imei}\n"
+            f"WiFi              : {info.wifi_state}\n"
+            f"Mobile Data       : {info.mobile_data_state}\n"
+            f"IP Address        : {info.ip_address}\n"
+            f"Network Operator  : {info.network_operator}\n"
+            f"SIM State         : {info.sim_state}\n"
+            f"Phone Type        : {info.phone_type}"
+        )
+
+    def _on_network_error(self, message: str):
+        self.network_status.setText("❌ Gagal membaca network info")
+        self.network_info_label.setText(message)
 
     # ------------------------------------------------------------------
     # Firmware & Flash Page
@@ -1980,28 +2224,38 @@ class MainWindow(QMainWindow):
 
     def refresh_firmware_info(self):
         if not self.current_device:
-            self.firmware_status.setText("? No device connected")
+            self.firmware_status.setText("⚠ No device connected")
             self.firmware_info_label.setText(
                 "Hubungkan device (mode normal) untuk melihat info build."
             )
             return
 
-        try:
-            info = get_build_info(self.current_device.serial)
+        if getattr(self, "_firmware_worker", None) and self._firmware_worker.isRunning():
+            return
 
-            self.firmware_status.setText("? Build Info OK")
-            self.firmware_info_label.setText(
-                f"Android Version   : {info.android_version}\n"
-                f"Build ID          : {info.build_id}\n"
-                f"Security Patch    : {info.security_patch}\n"
-                f"Baseband Version  : {info.baseband_version}\n"
-                f"Bootloader        : {info.bootloader_version}\n"
-                f"Build Date        : {info.build_date}\n"
-                f"Fingerprint       : {info.build_fingerprint}"
-            )
-        except ADBError as exc:
-            self.firmware_status.setText("? Gagal membaca build info")
-            self.firmware_info_label.setText(str(exc))
+        self.firmware_status.setText("⏳ Membaca build info...")
+        serial = self.current_device.serial
+
+        self._firmware_worker = AsyncWorker(lambda: get_build_info(serial), self)
+        self._firmware_worker.succeeded.connect(self._on_firmware_info_ready)
+        self._firmware_worker.failed.connect(self._on_firmware_info_error)
+        self._firmware_worker.start()
+
+    def _on_firmware_info_ready(self, info):
+        self.firmware_status.setText("✅ Build Info OK")
+        self.firmware_info_label.setText(
+            f"Android Version   : {info.android_version}\n"
+            f"Build ID          : {info.build_id}\n"
+            f"Security Patch    : {info.security_patch}\n"
+            f"Baseband Version  : {info.baseband_version}\n"
+            f"Bootloader        : {info.bootloader_version}\n"
+            f"Build Date        : {info.build_date}\n"
+            f"Fingerprint       : {info.build_fingerprint}"
+        )
+
+    def _on_firmware_info_error(self, message: str):
+        self.firmware_status.setText("❌ Gagal membaca build info")
+        self.firmware_info_label.setText(message)
 
     def select_firmware_image(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -2069,10 +2323,72 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Flash Gagal", str(exc))
 
     # ------------------------------------------------------------------
+    # Placeholder Page
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Smart Diagnosis Page
+    # ------------------------------------------------------------------
+
+    def create_smart_diagnosis_page(self):
+        self.smart_diagnosis_widget = SmartDiagnosisPage(
+            facts_provider=self._collect_smart_diagnosis_facts
+        )
+        return self.smart_diagnosis_widget
+
+    def _collect_smart_diagnosis_facts(self) -> dict:
+        """Gather real facts from the currently selected device for Smart Diagnosis.
+
+        Best-effort: any single check failing (e.g. root check needs a shell
+        that isn't available) must not stop the others from being collected.
+        """
+        facts: dict = {}
+
+        if not self.current_serial:
+            facts["connection_state"] = "not_detected"
+            return facts
+
+        state = self.devices.get(self.current_serial, "not_detected")
+        facts["connection_state"] = state
+
+        if state != "device":
+            return facts
+
+        try:
+            diag = get_diagnostics(self.current_serial)
+            level = diag.battery_level.replace("%", "").strip()
+            if level.lstrip("-").isdigit():
+                facts["battery_percent"] = int(level)
+        except (ADBError, ValueError, AttributeError) as exc:
+            logger.warning("Smart diagnosis: gagal ambil battery info: %s", exc)
+
+        try:
+            network = get_network_info(self.current_serial)
+            facts["imei"] = network.imei
+        except ADBError as exc:
+            logger.warning("Smart diagnosis: gagal ambil network info: %s", exc)
+
+        try:
+            security = run_security_check(self.current_serial)
+            facts["root_detected"] = security.is_rooted
+        except ADBError as exc:
+            logger.warning("Smart diagnosis: gagal ambil security check: %s", exc)
+
+        if getattr(self, "last_hardware_report", None):
+            failed = [
+                item.name for item in self.last_hardware_report.results
+                if item.status == "FAIL"
+            ]
+            if failed:
+                facts["hardware_failures"] = failed
+
+        return facts
+
+    # ------------------------------------------------------------------
     # Service Cases Page
     # ------------------------------------------------------------------
 
-    def create_cases_page(self):
+    def create_service_cases_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(32, 28, 32, 28)
@@ -2080,128 +2396,325 @@ class MainWindow(QMainWindow):
 
         title = QLabel("Service Cases")
         title.setObjectName("contentTitle")
-
-        desc = QLabel("Kelola tiket servis: data customer, keluhan, dan status pengerjaan.")
+        desc = QLabel("Catat & lacak setiap job servis dari masuk sampai selesai.")
         desc.setObjectName("muted")
-
         layout.addWidget(title)
         layout.addWidget(desc)
 
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(10)
+        form_card = QFrame()
+        form_card.setObjectName("card")
+        form_layout = QVBoxLayout(form_card)
+        form_layout.setContentsMargins(20, 16, 20, 16)
+        form_layout.setSpacing(8)
 
-        self.cases_new_button = QPushButton("Kasus Baru")
-        self.cases_new_button.setObjectName("actionPrimary")
-        self.cases_new_button.clicked.connect(self.create_new_case_dialog)
+        form_title = QLabel("Case Baru")
+        form_title.setObjectName("cardTitle")
+        form_layout.addWidget(form_title)
 
-        self.cases_refresh_button = QPushButton("Refresh")
-        self.cases_refresh_button.setObjectName("action")
-        self.cases_refresh_button.clicked.connect(self.refresh_cases_list)
+        self.case_customer_name = QLineEdit()
+        self.case_customer_name.setPlaceholderText("Nama customer *")
+        self.case_customer_phone = QLineEdit()
+        self.case_customer_phone.setPlaceholderText("No. HP customer")
+        self.case_complaint = QLineEdit()
+        self.case_complaint.setPlaceholderText("Keluhan (mis: layar retak, tidak mau nyala) *")
+        self.case_technician = QLineEdit()
+        self.case_technician.setPlaceholderText("Teknisi penanggung jawab")
+        self.case_cost = QLineEdit()
+        self.case_cost.setPlaceholderText("Estimasi biaya (Rp)")
 
-        self.cases_advance_button = QPushButton("Ubah Status")
-        self.cases_advance_button.setObjectName("action")
-        self.cases_advance_button.clicked.connect(self.advance_case_status)
+        for widget in (
+            self.case_customer_name, self.case_customer_phone,
+            self.case_complaint, self.case_technician, self.case_cost,
+        ):
+            form_layout.addWidget(widget)
 
-        btn_row.addWidget(self.cases_new_button)
-        btn_row.addWidget(self.cases_refresh_button)
-        btn_row.addWidget(self.cases_advance_button)
-        btn_row.addStretch()
+        self.case_use_current_device = QLabel("")
+        self.case_use_current_device.setObjectName("muted")
+        self.case_use_current_device.setWordWrap(True)
+        form_layout.addWidget(self.case_use_current_device)
 
-        layout.addLayout(btn_row)
+        self.case_save_button = QPushButton("Simpan Case Baru")
+        self.case_save_button.setObjectName("actionPrimary")
+        self.case_save_button.clicked.connect(self.create_new_case)
+        form_layout.addWidget(self.case_save_button)
+
+        layout.addWidget(form_card)
+
+        filter_row = QHBoxLayout()
+        self.case_search = QLineEdit()
+        self.case_search.setPlaceholderText("Cari nama customer / case number...")
+        self.case_status_filter = QComboBox()
+        self.case_status_filter.addItem("Semua Status")
+        for status in CASE_STATUSES:
+            self.case_status_filter.addItem(status)
+        self.case_refresh_button = QPushButton("Refresh")
+        self.case_refresh_button.clicked.connect(self.refresh_cases_table)
+        filter_row.addWidget(self.case_search, 2)
+        filter_row.addWidget(self.case_status_filter, 1)
+        filter_row.addWidget(self.case_refresh_button)
+        layout.addLayout(filter_row)
 
         self.cases_table = QTableWidget(0, 6)
         self.cases_table.setHorizontalHeaderLabels(
-            ["No. Kasus", "Customer", "Device", "Keluhan", "Status", "Update Terakhir"]
+            ["Case #", "Customer", "Device", "Complaint", "Status", "Updated"]
         )
-        self.cases_table.horizontalHeader().setStretchLastSection(True)
         self.cases_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.cases_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.cases_table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.cases_table, 1)
 
-        layout.addWidget(self.cases_table)
+        action_row = QHBoxLayout()
+        self.case_update_status_button = QPushButton("Update Status")
+        self.case_update_status_button.clicked.connect(self.update_selected_case_status)
+        self.case_add_note_button = QPushButton("Tambah Catatan")
+        self.case_add_note_button.clicked.connect(self.add_note_to_selected_case)
+        action_row.addWidget(self.case_update_status_button)
+        action_row.addWidget(self.case_add_note_button)
+        action_row.addStretch()
+        layout.addLayout(action_row)
+
+        self.case_search.textChanged.connect(self.refresh_cases_table)
+        self.case_status_filter.currentIndexChanged.connect(self.refresh_cases_table)
 
         return page
 
-    def refresh_cases_list(self):
+    def create_new_case(self):
+        customer_name = self.case_customer_name.text().strip()
+        complaint = self.case_complaint.text().strip()
+
+        if not customer_name or not complaint:
+            QMessageBox.warning(self, "Data Kurang", "Nama customer dan keluhan wajib diisi.")
+            return
+
         try:
-            cases = list_cases(limit=200)
+            cost_text = self.case_cost.text().strip().replace(".", "").replace(",", "")
+            cost = float(cost_text) if cost_text else 0
+        except ValueError:
+            QMessageBox.warning(self, "Biaya Tidak Valid", "Estimasi biaya harus berupa angka.")
+            return
+
+        device = self.current_device
+        try:
+            case = create_case(
+                customer_name=customer_name,
+                complaint=complaint,
+                customer_phone=self.case_customer_phone.text().strip(),
+                device_serial=device.serial if device else "",
+                manufacturer=device.manufacturer if device else "",
+                model=device.model if device else "",
+                technician=self.case_technician.text().strip(),
+                estimated_cost=cost,
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Gagal Menyimpan Case", str(exc))
+            return
+
+        logger.info("Service case dibuat: %s", case.case_number)
+        QMessageBox.information(self, "Case Dibuat", f"Case {case.case_number} berhasil disimpan.")
+
+        for widget in (
+            self.case_customer_name, self.case_customer_phone,
+            self.case_complaint, self.case_technician, self.case_cost,
+        ):
+            widget.clear()
+
+        self.refresh_cases_table()
+
+    def refresh_cases_table(self):
+        status_text = self.case_status_filter.currentText()
+        status = None if status_text == "Semua Status" else status_text
+        search = self.case_search.text().strip()
+
+        try:
+            cases = list_cases(status=status, search=search)
         except Exception as exc:
-            QMessageBox.critical(self, "Gagal Memuat", str(exc))
+            logger.error("Gagal memuat service cases: %s", exc)
             return
 
         self.cases_table.setRowCount(len(cases))
-
-        for row_idx, case in enumerate(cases):
+        for row, case in enumerate(cases):
+            device_label = f"{case.manufacturer} {case.model}".strip() or "-"
             values = [
-                case.case_number,
-                case.customer_name,
-                f"{case.manufacturer} {case.model}".strip() or "-",
-                case.complaint,
-                case.status,
-                case.updated_at,
+                case.case_number, case.customer_name, device_label,
+                case.complaint, case.status, case.updated_at,
             ]
-
-            for col_idx, val in enumerate(values):
-                item = QTableWidgetItem(str(val))
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
                 item.setData(Qt.UserRole, case.id)
-                self.cases_table.setItem(row_idx, col_idx, item)
+                self.cases_table.setItem(row, col, item)
 
-    def create_new_case_dialog(self):
-        customer_name, ok = QInputDialog.getText(self, "Kasus Baru", "Nama customer:")
-        if not ok or not customer_name.strip():
-            return
-
-        complaint, ok = QInputDialog.getMultiLineText(self, "Kasus Baru", "Keluhan:")
-        if not ok or not complaint.strip():
-            return
-
-        phone, ok = QInputDialog.getText(self, "Kasus Baru", "No. HP customer (opsional):")
-        if not ok:
-            phone = ""
-
-        device_serial = self.current_device.serial if self.current_device else ""
-        manufacturer = self.current_device.manufacturer if self.current_device else ""
-        model = self.current_device.model if self.current_device else ""
-
-        try:
-            case = create_case(
-                customer_name=customer_name.strip(),
-                complaint=complaint.strip(),
-                customer_phone=phone.strip(),
-                device_serial=device_serial,
-                manufacturer=manufacturer,
-                model=model,
-            )
-            QMessageBox.information(
-                self, "Kasus Dibuat", f"Kasus {case.case_number} berhasil dibuat."
-            )
-            self.refresh_cases_list()
-        except ValueError as exc:
-            QMessageBox.warning(self, "Data Tidak Valid", str(exc))
-        except Exception as exc:
-            QMessageBox.critical(self, "Gagal", str(exc))
-
-    def advance_case_status(self):
-        item = self.cases_table.currentItem()
-
-        if not item:
-            QMessageBox.warning(self, "Pilih Kasus", "Pilih baris kasus dari tabel dulu.")
-            return
-
+    def _selected_case_id(self) -> int | None:
         row = self.cases_table.currentRow()
-        case_id = self.cases_table.item(row, 0).data(Qt.UserRole)
+        if row < 0:
+            return None
+        item = self.cases_table.item(row, 0)
+        return item.data(Qt.UserRole) if item else None
+
+    def update_selected_case_status(self):
+        case_id = self._selected_case_id()
+        if case_id is None:
+            QMessageBox.information(self, "Pilih Case", "Pilih case dari tabel dulu.")
+            return
 
         status, ok = QInputDialog.getItem(
-            self, "Ubah Status", "Status baru:", list(STATUSES), editable=False
+            self, "Update Status", "Status baru:", list(CASE_STATUSES), 0, False
         )
-
         if not ok:
             return
 
+        note, _ = QInputDialog.getText(self, "Catatan (opsional)", "Catatan perubahan status:")
+
         try:
-            update_status(case_id, status)
-            self.refresh_cases_list()
-        except Exception as exc:
-            QMessageBox.critical(self, "Gagal", str(exc))
+            update_case_status(case_id, status, note.strip())
+        except ValueError as exc:
+            QMessageBox.warning(self, "Gagal Update", str(exc))
+            return
+
+        self.refresh_cases_table()
+
+    def add_note_to_selected_case(self):
+        case_id = self._selected_case_id()
+        if case_id is None:
+            QMessageBox.information(self, "Pilih Case", "Pilih case dari tabel dulu.")
+            return
+
+        note, ok = QInputDialog.getMultiLineText(self, "Tambah Catatan", "Catatan:")
+        if not ok or not note.strip():
+            return
+
+        add_case_note(case_id, note.strip())
+        QMessageBox.information(self, "Catatan Ditambahkan", "Catatan berhasil disimpan ke case ini.")
+
+    # ------------------------------------------------------------------
+    # Recovery Assistant Page (locked / inaccessible devices)
+    #
+    # Read-only guidance only. Never bypasses PIN/pattern/password/FRP --
+    # this deliberately mirrors the safety guarantees already enforced in
+    # core/recovery_actions.py, core/device_access_recovery.py, and
+    # core/locked_device_recovery.py.
+    # ------------------------------------------------------------------
+
+    def create_recovery_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(14)
+
+        title = QLabel("Recovery Assistant")
+        title.setObjectName("contentTitle")
+        desc = QLabel(
+            "Bantuan untuk device yang tidak bisa diakses (lupa PIN, unauthorized, "
+            "bootloop). Nexa TIDAK melakukan bypass PIN/pattern/password/FRP -- "
+            "hanya memberi panduan jalur resmi."
+        )
+        desc.setObjectName("muted")
+        desc.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(desc)
+
+        card = QFrame()
+        card.setObjectName("card")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(22, 20, 22, 20)
+        card_layout.setSpacing(9)
+
+        self.recovery_status = QLabel("Belum ada device dipilih.")
+        self.recovery_status.setObjectName("status")
+        self.recovery_recommended = QLabel("")
+        self.recovery_recommended.setObjectName("value")
+        self.recovery_recommended.setWordWrap(True)
+        self.recovery_warning = QLabel("")
+        self.recovery_warning.setObjectName("value")
+        self.recovery_warning.setWordWrap(True)
+
+        card_layout.addWidget(self.recovery_status)
+        card_layout.addWidget(self.recovery_recommended)
+        card_layout.addWidget(self.recovery_warning)
+        layout.addWidget(card)
+
+        plan_title = QLabel("Rencana Pemulihan (Locked Device Plan)")
+        plan_title.setObjectName("cardTitle")
+        layout.addWidget(plan_title)
+
+        self.recovery_plan_text = QTextEdit()
+        self.recovery_plan_text.setObjectName("value")
+        self.recovery_plan_text.setReadOnly(True)
+        self.recovery_plan_text.setFixedHeight(160)
+        layout.addWidget(self.recovery_plan_text)
+
+        self.recovery_refresh_button = QPushButton("Jalankan Assessment")
+        self.recovery_refresh_button.setObjectName("actionPrimary")
+        self.recovery_refresh_button.clicked.connect(self.refresh_recovery_assessment)
+        layout.addWidget(self.recovery_refresh_button)
+        layout.addStretch()
+
+        return page
+
+    def refresh_recovery_assessment(self):
+        if not self.current_serial:
+            self.recovery_status.setText("Tidak ada device terhubung.")
+            self.recovery_recommended.setText("")
+            self.recovery_warning.setText("")
+            self.recovery_plan_text.setPlainText(
+                "\n".join(
+                    f"- {action}"
+                    for action in plan_locked_device(adb_state="not_detected").actions
+                )
+            )
+            return
+
+        state = self.devices.get(self.current_serial, "not_detected")
+
+        # Bagian logic lokal (tidak panggil ADB) - tetap sinkron karena cepat.
+        access_report = diagnose_access_issue({"adb_state": state})
+        plan = plan_locked_device(adb_state=state)
+
+        lines = [f"[{plan.title}]"]
+        lines.extend(f"- {action}" for action in plan.actions)
+        if getattr(access_report, "findings", None):
+            lines.append("")
+            lines.append("Findings tambahan:")
+            for finding in access_report.findings:
+                lines.append(f"- [{finding.severity.upper()}] {finding.title}: {finding.action}")
+
+        self.recovery_plan_text.setPlainText("\n".join(lines))
+
+        # Bagian yang panggil ADB (assess_access) - jalankan di background.
+        if getattr(self, "_recovery_worker", None) and self._recovery_worker.isRunning():
+            return
+
+        self.recovery_status.setText("⏳ Menilai akses device...")
+        serial = self.current_serial
+
+        self._recovery_worker = AsyncWorker(lambda: assess_access(serial), self)
+        self._recovery_worker.succeeded.connect(self._on_recovery_assessment_ready)
+        self._recovery_worker.failed.connect(self._on_recovery_assessment_error)
+        self._recovery_worker.start()
+
+    def _on_recovery_assessment_ready(self, assessment):
+        self.recovery_status.setText(f"State ADB: {assessment.adb_state}")
+        self.recovery_recommended.setText(f"Rekomendasi: {assessment.recommended_path}")
+        self.recovery_warning.setText(f"Catatan: {assessment.warning}")
+
+    def _on_recovery_assessment_error(self, message: str):
+        self.recovery_status.setText("Gagal menilai akses.")
+        self.recovery_recommended.setText(message)
+        self.recovery_warning.setText("")
+
+    # ------------------------------------------------------------------
+    # Factory Reset Assistant Page
+    # ------------------------------------------------------------------
+
+    def create_factory_reset_page(self):
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        model = "Unknown device"
+        self.factory_reset_panel = FactoryResetAssistantPanel(model=model)
+        layout.addWidget(self.factory_reset_panel)
+
+        return wrapper
 
     # ------------------------------------------------------------------
     # Settings Page
@@ -2215,10 +2728,8 @@ class MainWindow(QMainWindow):
 
         title = QLabel("Settings")
         title.setObjectName("contentTitle")
-
-        desc = QLabel("Preferensi aplikasi, tersimpan otomatis ke data/settings.json.")
+        desc = QLabel("Preferensi aplikasi Nexa Service Tool.")
         desc.setObjectName("muted")
-
         layout.addWidget(title)
         layout.addWidget(desc)
 
@@ -2226,75 +2737,261 @@ class MainWindow(QMainWindow):
         card.setObjectName("card")
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(22, 20, 22, 20)
-        card_layout.setSpacing(12)
+        card_layout.setSpacing(10)
 
-        refresh_label = QLabel("Interval refresh device (ms)")
-        refresh_label.setObjectName("cardTitle")
-
-        self.settings_refresh_input = QLineEdit(
-            str(self.settings_store.get("auto_refresh_ms", 1500))
-        )
+        refresh_label = QLabel("Auto-refresh device list (ms)")
+        refresh_label.setObjectName("muted")
+        self.settings_refresh_ms = QLineEdit()
         card_layout.addWidget(refresh_label)
-        card_layout.addWidget(self.settings_refresh_input)
+        card_layout.addWidget(self.settings_refresh_ms)
 
-        self.settings_confirm_checkbox = QPushButton(
-            self._checkbox_label(
-                "Konfirmasi untuk aksi berisiko (reboot/flash/delete)",
-                self.settings_store.get("confirm_dangerous_actions", True),
-            )
-        )
-        self.settings_confirm_checkbox.setObjectName("action")
-        self.settings_confirm_checkbox.setCheckable(True)
-        self.settings_confirm_checkbox.setChecked(
-            bool(self.settings_store.get("confirm_dangerous_actions", True))
-        )
-        self.settings_confirm_checkbox.clicked.connect(self._toggle_confirm_setting)
+        loglevel_label = QLabel("Log level")
+        loglevel_label.setObjectName("muted")
+        self.settings_log_level = QComboBox()
+        self.settings_log_level.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
+        card_layout.addWidget(loglevel_label)
+        card_layout.addWidget(self.settings_log_level)
 
-        card_layout.addWidget(self.settings_confirm_checkbox)
+        self.settings_confirm_dangerous = QPushButton("Konfirmasi aksi berbahaya: ON")
+        self.settings_confirm_dangerous.setCheckable(True)
+        self.settings_confirm_dangerous.clicked.connect(self._toggle_confirm_dangerous_label)
+        card_layout.addWidget(self.settings_confirm_dangerous)
+
+        self.settings_mask_identifiers = QPushButton("Sembunyikan IMEI/Serial sensitif: ON")
+        self.settings_mask_identifiers.setCheckable(True)
+        self.settings_mask_identifiers.clicked.connect(self._toggle_mask_identifiers_label)
+        card_layout.addWidget(self.settings_mask_identifiers)
+
         layout.addWidget(card)
 
         self.settings_save_button = QPushButton("Simpan Settings")
         self.settings_save_button.setObjectName("actionPrimary")
-        self.settings_save_button.clicked.connect(self.save_settings)
-
+        self.settings_save_button.clicked.connect(self.save_settings_form)
         layout.addWidget(self.settings_save_button)
         layout.addStretch()
 
         return page
 
-    @staticmethod
-    def _checkbox_label(text: str, checked: bool) -> str:
-        prefix = "[x] " if checked else "[ ] "
-        return prefix + text
-
-    def _toggle_confirm_setting(self):
-        checked = self.settings_confirm_checkbox.isChecked()
-        self.settings_confirm_checkbox.setText(
-            self._checkbox_label(
-                "Konfirmasi untuk aksi berisiko (reboot/flash/delete)", checked
-            )
+    def _toggle_confirm_dangerous_label(self, checked: bool):
+        self.settings_confirm_dangerous.setText(
+            f"Konfirmasi aksi berbahaya: {'ON' if checked else 'OFF'}"
         )
 
-    def save_settings(self):
+    def _toggle_mask_identifiers_label(self, checked: bool):
+        self.settings_mask_identifiers.setText(
+            f"Sembunyikan IMEI/Serial sensitif: {'ON' if checked else 'OFF'}"
+        )
+
+    def load_settings_form(self):
+        self.settings_refresh_ms.setText(str(self.settings.get("auto_refresh_ms", 1500)))
+
+        log_level = self.settings.get("log_level", "INFO")
+        idx = self.settings_log_level.findText(log_level)
+        self.settings_log_level.setCurrentIndex(idx if idx >= 0 else 1)
+
+        confirm = bool(self.settings.get("confirm_dangerous_actions", True))
+        self.settings_confirm_dangerous.setChecked(confirm)
+        self._toggle_confirm_dangerous_label(confirm)
+
+        mask = bool(self.settings.get("mask_sensitive_identifiers", True))
+        self.settings_mask_identifiers.setChecked(mask)
+        self._toggle_mask_identifiers_label(mask)
+
+    def save_settings_form(self):
         try:
-            interval = int(self.settings_refresh_input.text().strip())
-        except ValueError:
-            QMessageBox.warning(self, "Nilai Tidak Valid", "Interval harus berupa angka.")
+            refresh_ms = int(self.settings_refresh_ms.text().strip())
+            if refresh_ms < 250:
+                raise ValueError("Auto-refresh minimal 250ms.")
+        except ValueError as exc:
+            QMessageBox.warning(self, "Nilai Tidak Valid", str(exc) or "Auto-refresh harus berupa angka.")
             return
 
-        self.settings_store.update(
-            {
-                "auto_refresh_ms": interval,
-                "confirm_dangerous_actions": self.settings_confirm_checkbox.isChecked(),
-            }
+        self.settings.update({
+            "auto_refresh_ms": refresh_ms,
+            "log_level": self.settings_log_level.currentText(),
+            "confirm_dangerous_actions": self.settings_confirm_dangerous.isChecked(),
+            "mask_sensitive_identifiers": self.settings_mask_identifiers.isChecked(),
+        })
+
+        self.timer.setInterval(refresh_ms)
+        logger.info("Settings disimpan: refresh=%sms, log_level=%s", refresh_ms, self.settings_log_level.currentText())
+        QMessageBox.information(self, "Settings Disimpan", "Preferensi berhasil disimpan.")
+
+    # ------------------------------------------------------------------
+    # Automation / Macro Runner Page
+    # ------------------------------------------------------------------
+
+    def create_automation_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(14)
+
+        title = QLabel("Automation")
+        title.setObjectName("contentTitle")
+
+        desc = QLabel(
+            "Susun langkah-langkah (macro) dan jalankan berurutan pada device aktif. "
+            "Berguna untuk pekerjaan servis yang berulang."
+        )
+        desc.setObjectName("muted")
+        desc.setWordWrap(True)
+
+        layout.addWidget(title)
+        layout.addWidget(desc)
+
+        builder_row = QHBoxLayout()
+        builder_row.setSpacing(8)
+
+        self.automation_action_combo = QComboBox()
+        self.automation_action_combo.setObjectName("deviceSelector")
+        self.automation_action_combo.addItems(sorted(ACTIONS.keys()))
+
+        self.automation_param_input = QLineEdit()
+        self.automation_param_input.setPlaceholderText(
+            "Parameter (contoh: package=com.whatsapp atau cmd=pm list packages)"
         )
 
-        self.timer.setInterval(interval)
-        QMessageBox.information(self, "Tersimpan", "Settings berhasil disimpan.")
+        self.automation_add_step_button = QPushButton("Tambah Step")
+        self.automation_add_step_button.setObjectName("action")
+        self.automation_add_step_button.clicked.connect(self.add_macro_step)
 
-    # ------------------------------------------------------------------
-    # Placeholder Page
-    # ------------------------------------------------------------------
+        builder_row.addWidget(self.automation_action_combo)
+        builder_row.addWidget(self.automation_param_input, 1)
+        builder_row.addWidget(self.automation_add_step_button)
+
+        layout.addLayout(builder_row)
+
+        self.automation_steps_list = QListWidget()
+        self.automation_steps_list.setMaximumHeight(150)
+        layout.addWidget(self.automation_steps_list)
+
+        step_btn_row = QHBoxLayout()
+        step_btn_row.setSpacing(8)
+
+        self.automation_remove_step_button = QPushButton("Hapus Step Terpilih")
+        self.automation_remove_step_button.setObjectName("action")
+        self.automation_remove_step_button.clicked.connect(self.remove_macro_step)
+
+        self.automation_clear_steps_button = QPushButton("Kosongkan")
+        self.automation_clear_steps_button.setObjectName("action")
+        self.automation_clear_steps_button.clicked.connect(self.clear_macro_steps)
+
+        step_btn_row.addWidget(self.automation_remove_step_button)
+        step_btn_row.addWidget(self.automation_clear_steps_button)
+        step_btn_row.addStretch()
+
+        layout.addLayout(step_btn_row)
+
+        self.automation_run_button = QPushButton("Jalankan Macro pada Device Aktif")
+        self.automation_run_button.setObjectName("actionPrimary")
+        self.automation_run_button.clicked.connect(self.run_macro_now)
+        layout.addWidget(self.automation_run_button)
+
+        self.automation_log = QPlainTextEdit()
+        self.automation_log.setObjectName("logConsole")
+        self.automation_log.setReadOnly(True)
+        layout.addWidget(self.automation_log)
+
+        return page
+
+    @staticmethod
+    def _parse_macro_params(text: str) -> dict:
+        """Parse 'key=value, key2=value2' jadi dict sederhana."""
+        params = {}
+        text = text.strip()
+
+        if not text:
+            return params
+
+        for pair in text.split(","):
+            if "=" not in pair:
+                continue
+            key, value = pair.split("=", 1)
+            params[key.strip()] = value.strip()
+
+        return params
+
+    def add_macro_step(self):
+        action = self.automation_action_combo.currentText()
+        params = self._parse_macro_params(self.automation_param_input.text())
+
+        step = MacroStep(action=action, params=params, label=f"{action}({params})")
+        self._macro_steps.append(step)
+
+        self.automation_steps_list.addItem(f"{len(self._macro_steps)}. {step.label}")
+        self.automation_param_input.clear()
+
+    def remove_macro_step(self):
+        row = self.automation_steps_list.currentRow()
+
+        if row < 0 or row >= len(self._macro_steps):
+            return
+
+        del self._macro_steps[row]
+        self._rebuild_macro_steps_list()
+
+    def clear_macro_steps(self):
+        self._macro_steps.clear()
+        self._rebuild_macro_steps_list()
+
+    def _rebuild_macro_steps_list(self):
+        self.automation_steps_list.clear()
+
+        for i, step in enumerate(self._macro_steps, start=1):
+            self.automation_steps_list.addItem(f"{i}. {step.label}")
+
+    def run_macro_now(self):
+        if not self.current_device:
+            QMessageBox.warning(self, "Tidak ada device", "Hubungkan device terlebih dahulu.")
+            return
+
+        if not self._macro_steps:
+            QMessageBox.warning(self, "Macro Kosong", "Tambahkan minimal 1 step dulu.")
+            return
+
+        reply = QMessageBox.question(
+            self, "Konfirmasi Jalankan Macro",
+            f"Jalankan {len(self._macro_steps)} step pada device "
+            f"{self.current_device.serial}?\n\n"
+            f"Beberapa aksi (uninstall, delete file, reboot) tidak bisa dibatalkan.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        if getattr(self, "_automation_worker", None) and self._automation_worker.isRunning():
+            QMessageBox.information(self, "Sedang Berjalan", "Macro lain sedang berjalan.")
+            return
+
+        self.automation_log.clear()
+        self.automation_log.appendPlainText(
+            f"Menjalankan {len(self._macro_steps)} step pada {self.current_device.serial}..."
+        )
+        self.automation_run_button.setEnabled(False)
+
+        serial = self.current_device.serial
+        macro = Macro(name="Manual Macro", steps=list(self._macro_steps))
+
+        def task():
+            return automation.run_macro(serial, macro, stop_on_error=False)
+
+        self._automation_worker = AsyncWorker(task, self)
+        self._automation_worker.succeeded.connect(self._on_macro_ready)
+        self._automation_worker.failed.connect(self._on_macro_error)
+        self._automation_worker.start()
+
+    def _on_macro_ready(self, results: list):
+        for i, line in enumerate(results, start=1):
+            self.automation_log.appendPlainText(f"[{i}] {line}")
+
+        self.automation_log.appendPlainText("--- Macro selesai ---")
+        self.automation_run_button.setEnabled(True)
+
+    def _on_macro_error(self, message: str):
+        self.automation_log.appendPlainText(f"ERROR: {message}")
+        self.automation_run_button.setEnabled(True)
 
     def create_placeholder_page(self, title_text: str, desc_text: str):
         page = QWidget()
@@ -2392,13 +3089,13 @@ class MainWindow(QMainWindow):
             device = get_device_info(self.current_serial)
             self.current_device = device
 
-            self.dashboard_status.setText("? Device connected")
+            self.dashboard_status.setText("✅ Device connected")
             self.dashboard_info.setText(
                 f"{device.manufacturer} {device.model}\n"
                 f"Android {device.android_version}"
             )
 
-            self.device_status.setText("? Connected via ADB")
+            self.device_status.setText("✅ Connected via ADB")
             self.device_info.setText(
                 f"Manufacturer : {device.manufacturer}\n"
                 f"Model        : {device.model}\n"
@@ -2419,10 +3116,10 @@ class MainWindow(QMainWindow):
     def _set_no_device(self, message: str):
         self.current_device = None
 
-        self.dashboard_status.setText("? No device connected")
+        self.dashboard_status.setText("⚠ No device connected")
         self.dashboard_info.setText(message)
 
-        self.device_status.setText("? No device connected")
+        self.device_status.setText("⚠ No device connected")
         self.device_info.setText(message)
 
         self.reboot_button.setEnabled(False)
@@ -2442,6 +3139,9 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == "__main__":
+    configure_logging()
+    logger.info("Launching Nexa Service Tool")
+
     app = QApplication(sys.argv)
 
     window = MainWindow()

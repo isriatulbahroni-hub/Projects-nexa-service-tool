@@ -74,6 +74,7 @@ class SmartDiagnosisPage(QWidget):
         self.findings_table = QTableWidget(0, 4)
         self.findings_table.setHorizontalHeaderLabels(["Code", "Severity", "Finding", "Summary"])
         self.findings_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.findings_table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.findings_table, 2)
 
         rec_title = QLabel("Rekomendasi Aman")

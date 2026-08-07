@@ -43,16 +43,19 @@ def configure_logging(level: int = logging.INFO) -> logging.Logger:
 def get_logger(name: str | None = None) -> logging.Logger:
     """Return a configured child logger."""
     root = configure_logging()
-
     if not name:
         return root
 
     child = root.getChild(name)
+    # getChild() does not inherit the parent's explicit level (only the
+    # *effective* level resolves through the hierarchy) -- set it directly
+    # so child.level reflects INFO instead of NOTSET.
     child.setLevel(root.level)
-
     if not child.handlers:
+        # Reuse the root's handler instances (not new ones) so we don't open
+        # a second file handle, and stop propagation so records aren't
+        # written twice (once via child, once bubbling up to root).
         for handler in root.handlers:
             child.addHandler(handler)
-
-    child.propagate = False
+        child.propagate = False
     return child

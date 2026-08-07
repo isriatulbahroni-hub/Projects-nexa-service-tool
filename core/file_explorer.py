@@ -12,7 +12,11 @@ class RemoteEntry:
 
 
 def list_dir(serial: str, remote_path: str = "/sdcard") -> list[RemoteEntry]:
-    output = run_adb("-s", serial, "shell", "ls", "-la", remote_path)
+    # /sdcard adalah symlink ke /storage/self/primary. Tanpa trailing
+    # slash, toybox `ls -la` di beberapa build Android menampilkan baris
+    # symlink itu sendiri, bukan isi direktori targetnya.
+    path = remote_path if remote_path.endswith("/") else remote_path + "/"
+    output = run_adb("-s", serial, "shell", "ls", "-la", path)
     entries: list[RemoteEntry] = []
 
     for line in output.splitlines():
