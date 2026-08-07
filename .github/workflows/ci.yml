@@ -9,6 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PYTHONPATH: '.'
+      QT_QPA_PLATFORM: offscreen
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,7 +28,7 @@ jobs:
       - name: Install system libraries for Qt/PySide6
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-glx libegl1-mesa
+          sudo apt-get install -y libgl1 libegl1
 
       - name: Compile Python modules
         run: python -m compileall -q .
