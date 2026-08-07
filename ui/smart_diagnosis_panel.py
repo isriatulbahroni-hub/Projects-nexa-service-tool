@@ -94,6 +94,7 @@ class SmartDiagnosisPanel(QWidget):
         )
         self.findings_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.findings_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.findings_table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.findings_table, 1)
 
         self.recommendations = QLabel("Belum ada rekomendasi.")

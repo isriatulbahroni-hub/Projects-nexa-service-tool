@@ -241,6 +241,20 @@ QTableWidget {
     gridline-color: #22262f;
 }
 
+QTableWidget QTableCornerButton::section {
+    background: #1a1d24;
+    border: none;
+}
+
+QTextEdit, QPlainTextEdit {
+    background: #14161c;
+    color: #d3d7de;
+    border: 1px solid #22262f;
+    border-radius: 10px;
+    padding: 8px;
+    selection-background-color: #ff5a1f;
+}
+
 QHeaderView::section {
     background: #1a1d24;
     color: #b7bdc7;
@@ -655,93 +669,6 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Hardware Test Error", message)
         self.hardware_run_button.setEnabled(True)
         self._hardware_task_refs = None
-
-    # ------------------------------------------------------------------
-    # Hardware Test Page
-    # ------------------------------------------------------------------
-
-    def create_hardware_test_page(self):
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(32, 28, 32, 28)
-        layout.setSpacing(16)
-
-        title = QLabel("Hardware Test")
-        title.setObjectName("contentTitle")
-        desc = QLabel("Safe, read-only checks for the connected Android device.")
-        desc.setObjectName("muted")
-        layout.addWidget(title)
-        layout.addWidget(desc)
-
-        summary = QFrame()
-        summary.setObjectName("card")
-        summary_layout = QHBoxLayout(summary)
-        summary_layout.setContentsMargins(20, 16, 20, 16)
-        self.hardware_score = QLabel("-- / 100")
-        self.hardware_score.setObjectName("scoreBig")
-        self.hardware_summary = QLabel("Run a full hardware test to collect a report.")
-        self.hardware_summary.setObjectName("value")
-        summary_layout.addWidget(self.hardware_score)
-        summary_layout.addWidget(self.hardware_summary, 1)
-        layout.addWidget(summary)
-
-        actions = QHBoxLayout()
-        self.hardware_run_button = QPushButton("RUN FULL HARDWARE TEST")
-        self.hardware_run_button.setObjectName("actionPrimary")
-        self.hardware_run_button.clicked.connect(self.run_full_hardware_test)
-        self.hardware_refresh_button = QPushButton("Refresh")
-        self.hardware_refresh_button.setObjectName("action")
-        self.hardware_refresh_button.clicked.connect(self.refresh_hardware_test_status)
-        actions.addWidget(self.hardware_run_button)
-        actions.addWidget(self.hardware_refresh_button)
-        actions.addStretch()
-        layout.addLayout(actions)
-
-        self.hardware_table = QTableWidget(0, 4)
-        self.hardware_table.setHorizontalHeaderLabels(["Check", "Status", "Value", "Detail"])
-        self.hardware_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.hardware_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.hardware_table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.hardware_table, 1)
-
-        warning = QLabel("Read-only diagnostics: camera, speaker, microphone, sensors, fingerprint and touchscreen still require physical interaction tests.")
-        warning.setObjectName("muted")
-        warning.setWordWrap(True)
-        layout.addWidget(warning)
-        return page
-
-    def refresh_hardware_test_status(self):
-        if not self.current_serial:
-            self.hardware_score.setText("-- / 100")
-            self.hardware_summary.setText("No authorized ADB device connected.")
-            self.hardware_run_button.setEnabled(False)
-            self.hardware_table.setRowCount(0)
-            return
-        self.hardware_run_button.setEnabled(True)
-        self.hardware_summary.setText(f"Ready: {self.current_serial}")
-
-    def run_full_hardware_test(self):
-        if not self.current_serial:
-            QMessageBox.warning(self, "No Device", "Connect and authorize an Android device first.")
-            return
-        self.hardware_run_button.setEnabled(False)
-        QApplication.processEvents()
-        try:
-            report = run_hardware_test(self.current_serial)
-            self.hardware_score.setText(f"{report.score} / 100")
-            self.hardware_summary.setText(
-                f"PASS {report.passed}  |  WARN {report.warnings}  |  FAIL {report.failed}"
-            )
-            self.hardware_table.setRowCount(len(report.results))
-            for row, item in enumerate(report.results):
-                values = [item.name, item.status, item.value, item.detail]
-                for col, value in enumerate(values):
-                    self.hardware_table.setItem(row, col, QTableWidgetItem(str(value)))
-            self.last_hardware_report = report
-        except Exception as exc:
-            QMessageBox.critical(self, "Hardware Test Error", str(exc))
-        finally:
-            self.hardware_run_button.setEnabled(True)
 
     # ------------------------------------------------------------------
     # Device Page
