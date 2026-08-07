@@ -18,6 +18,7 @@ from .frp_verification import (
     FRPVerificationError,
     collect_frp_verification,
 )
+from .tool_router import ToolRouter
 
 
 class AccessProblem(str, Enum):
@@ -73,6 +74,7 @@ class LockedDeviceRecoveryState:
     recovery_options: tuple[str, ...]
     supported_actions: tuple[str, ...]
     confirmation_required: bool
+    recommended_tools: tuple[str, ...]
     message: str
 
 
@@ -276,6 +278,32 @@ def _collect_device_identity(serial: str, authorized: bool, fastboot_vars: dict[
     return identity
 
 
+def _infer_brand_group(identity: dict[str, str]) -> str:
+    raw = " ".join(
+        identity.get(key, "") for key in (
+            "manufacturer", "brand", "model", "product", "device"
+        )
+    ).lower()
+
+    if "samsung" in raw:
+        return "Samsung"
+    if any(tag in raw for tag in ("xiaomi", "redmi", "poco")):
+        return "Xiaomi / Redmi / POCO"
+    if any(tag in raw for tag in ("oppo", "realme")):
+        return "OPPO / realme"
+    if any(tag in raw for tag in ("vivo", "iqoo")):
+        return "vivo / iQOO"
+    if any(tag in raw for tag in ("infinix", "tecno")):
+        return "Infinix / TECNO"
+    if any(tag in raw for tag in ("motorola", "moto")):
+        return "Motorola"
+    if any(tag in raw for tag in ("nokia", "hmd")):
+        return "Nokia / HMD"
+    if "oneplus" in raw:
+        return "OnePlus"
+    return "Unknown"
+
+
 def _build_recovery_options(device_mode: str, authorized: bool,
                             owner_verification_required: bool | None) -> tuple[str, ...]:
     options: list[str] = []
@@ -381,6 +409,17 @@ def detect_locked_device_recovery_state(
     confirmation_required = any(
         action in supported_actions for action in ("reboot_recovery", "reboot_bootloader")
     )
+
+    router = ToolRouter()
+    recommended_tools = tuple(
+        router.select_tools_for_device(
+            brand_group=_infer_brand_group(identity),
+            device_mode=device_mode,
+            fastboot_connected=fastboot_connected,
+            authorized=authorized,
+        )
+    )
+
     message = "Locked device recovery workflow detected."
 
     if device_mode == "No connection":

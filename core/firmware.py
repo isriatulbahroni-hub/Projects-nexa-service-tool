@@ -1,8 +1,39 @@
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 from .adb import run_adb, ADBError
 from .config import FASTBOOT_PATH
+from .tool_router import ToolRouter
+
+
+_router = ToolRouter()
+
+
+def _resolve_fastboot_path() -> str:
+    if FASTBOOT_PATH.exists():
+        return str(FASTBOOT_PATH)
+
+    fastboot_path = _router.get_tool_path("fastboot")
+    if fastboot_path:
+        return str(fastboot_path)
+
+    return str(FASTBOOT_PATH)
+
+
+def run_fastboot(*args: str, timeout: int = 60) -> str:
+    fastboot_executable = _resolve_fastboot_path()
+    if not Path(fastboot_executable).exists():
+        raise FastbootError(f"Fastboot tidak ditemukan: {fastboot_executable}")
+
+    try:
+        result = subprocess.run(
+            [fastboot_executable, *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
 
 
 class FastbootError(RuntimeError):

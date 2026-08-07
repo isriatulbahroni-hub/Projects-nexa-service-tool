@@ -2863,6 +2863,10 @@ class MainWindow(QMainWindow):
         self.locked_supported_label = QLabel("Supported Actions: -")
         self.locked_supported_label.setObjectName("value")
 
+        self.locked_tools_label = QLabel("Recommended Tools: -")
+        self.locked_tools_label.setObjectName("muted")
+        self.locked_tools_label.setWordWrap(True)
+
         self.locked_confirm_label = QLabel("Confirmation: -")
         self.locked_confirm_label.setObjectName("value")
 
@@ -2876,6 +2880,7 @@ class MainWindow(QMainWindow):
             self.locked_mode_label,
             self.locked_options_label,
             self.locked_supported_label,
+            self.locked_tools_label,
             self.locked_confirm_label,
             self.locked_action_message_label,
         ):
@@ -3340,6 +3345,10 @@ class MainWindow(QMainWindow):
         )
         self.locked_supported_label.setText(
             f"Supported Actions: {supported_text}"
+        )
+        self.locked_tools_label.setText(
+            "Recommended Tools: " + ", ".join(state.recommended_tools)
+            if state.recommended_tools else "Recommended Tools: none"
         )
         self.locked_confirm_label.setText(
             "Confirmation: required"

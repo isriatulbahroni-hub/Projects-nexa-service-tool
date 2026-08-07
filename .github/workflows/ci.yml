@@ -7,6 +7,8 @@ on:
 jobs:
   tests:
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: '.'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,6 +23,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest
+
+      - name: Install system libraries for Qt/PySide6
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-glx libegl1-mesa
 
       - name: Compile Python modules
         run: python -m compileall -q .

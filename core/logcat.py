@@ -1,6 +1,12 @@
+from pathlib import Path
+
 from PySide6.QtCore import QProcess, QObject, Signal
 
 from .config import ADB_PATH
+from .tool_router import ToolRouter
+
+
+_router = ToolRouter()
 
 
 class LogcatStreamer(QObject):
@@ -31,12 +37,16 @@ class LogcatStreamer(QObject):
         if self.process is not None:
             return
 
-        if not ADB_PATH.exists():
-            self.error_occurred.emit(f"ADB tidak ditemukan: {ADB_PATH}")
+        adb_path = _router.get_tool_path("adb")
+        if adb_path is None:
+            adb_path = ADB_PATH
+
+        if not Path(adb_path).exists():
+            self.error_occurred.emit(f"ADB tidak ditemukan: {adb_path}")
             return
 
         self.process = QProcess(self)
-        self.process.setProgram(str(ADB_PATH))
+        self.process.setProgram(str(adb_path))
         self.process.setArguments(
             ["-s", self.serial, "logcat", "-v", "time", filter_level]
         )

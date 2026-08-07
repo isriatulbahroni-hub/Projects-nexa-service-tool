@@ -1,19 +1,36 @@
 import subprocess
+from pathlib import Path
 
 from .config import ADB_PATH
+from .tool_router import ToolRouter
 
 
 class ADBError(RuntimeError):
     pass
 
 
+_router = ToolRouter()
+
+
+def _resolve_adb_path() -> str:
+    if ADB_PATH.exists():
+        return str(ADB_PATH)
+
+    adb_path = _router.get_tool_path("adb")
+    if adb_path:
+        return str(adb_path)
+
+    return str(ADB_PATH)
+
+
 def run_adb(*args: str, timeout: int = 15) -> str:
-    if not ADB_PATH.exists():
-        raise ADBError(f"ADB tidak ditemukan: {ADB_PATH}")
+    adb_executable = _resolve_adb_path()
+    if not Path(adb_executable).exists():
+        raise ADBError(f"ADB tidak ditemukan: {adb_executable}")
 
     try:
         result = subprocess.run(
-            [str(ADB_PATH), *args],
+            [adb_executable, *args],
             capture_output=True,
             text=True,
             timeout=timeout,
