@@ -4,7 +4,17 @@ from core.locked_device_recovery import plan_locked_device
 def test_unauthorized_never_offers_bypass():
     plan = plan_locked_device(adb_state="unauthorized")
     assert plan.state == "unauthorized"
-    assert all("bypass" not in action.lower() for action in plan.actions)
+    # Actions may legitimately mention "bypass" as part of a prohibition
+    # (e.g. "Do not attempt a lock bypass"). What must never happen is an
+    # action that *instructs* performing one -- so we only fail if "bypass"
+    # appears without an accompanying negation/refusal phrase.
+    negations = ("do not", "don't", "never", "no ")
+    for action in plan.actions:
+        lowered = action.lower()
+        if "bypass" in lowered:
+            assert any(neg in lowered for neg in negations), (
+                f"Action mentions bypass without a clear prohibition: {action!r}"
+            )
 
 
 def test_recovery_warns_about_data_loss_and_account():

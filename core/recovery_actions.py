@@ -88,7 +88,7 @@ def assess_access(serial: str) -> AccessAssessment:
     return AccessAssessment(
         serial, state, False,
         "Gunakan deteksi Fastboot/Recovery dan prosedur resmi untuk model perangkat.",
-        "Tidak ada kanal ADB aktif; screen-lock/FRP bypass tidak được hỗ trợ.",
+        "Tidak ada kanal ADB aktif; screen-lock/FRP bypass tidak didukung.",
     )
 
 

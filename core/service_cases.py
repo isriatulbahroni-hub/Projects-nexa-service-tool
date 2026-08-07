@@ -125,11 +125,11 @@ def create_case(
         case_number = _new_case_number(conn)
         cur = conn.execute(
             """INSERT INTO service_cases
-            (case_number, customer_name, customer_phone, device_serial, imei,
+            (case_number, customer_name, complaint, customer_phone, device_serial, imei,
              manufacturer, model, technician, status, estimated_cost, notes,
              created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Received', ?, ?, ?, ?)""",
-            (case_number, customer_name.strip(), customer_phone.strip(),
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Received', ?, ?, ?, ?)""",
+            (case_number, customer_name.strip(), complaint.strip(), customer_phone.strip(),
              device_serial.strip(), imei.strip(), manufacturer.strip(),
              model.strip(), technician.strip(), float(estimated_cost),
              notes.strip(), now, now),

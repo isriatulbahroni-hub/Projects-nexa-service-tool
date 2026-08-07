@@ -43,7 +43,11 @@ class HardwareTestReport:
             return 0
         weights = {"PASS": 1.0, "INFO": 0.8, "WARN": 0.5, "FAIL": 0.0}
         total = sum(weights.get(item.status, 0.0) for item in self.results)
-        return round(total / len(self.results) * 100)
+        # Binary floats can't represent values like 2.3/4 exactly, so a true
+        # x.5 sometimes lands a hair under (e.g. 57.49999999999999) and
+        # round() truncates it down instead of up. A tiny epsilon corrects
+        # that representation error without affecting any other value.
+        return round(total / len(self.results) * 100 + 1e-9)
 
 
 def _shell(serial: str, *args: str, timeout: int = 10) -> str:

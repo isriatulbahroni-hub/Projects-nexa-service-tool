@@ -69,6 +69,24 @@ from core.firmware import (
 )
 from core.network_info import get_network_info
 from core.hardware_test import run_hardware_test
+from core.task_runner import run_in_thread
+from core.app_logging import configure_logging, get_logger
+from core.settings import SettingsStore
+from core.service_cases import (
+    STATUSES as CASE_STATUSES,
+    create_case,
+    list_cases,
+    get_case,
+    update_status as update_case_status,
+    add_note as add_case_note,
+)
+from core.recovery_actions import assess_access, factory_reset_guidance
+from core.device_access_recovery import diagnose_access_issue
+from core.locked_device_recovery import plan_locked_device
+from core.factory_reset_ui import FactoryResetAssistantPanel
+from ui.smart_diagnosis_page import SmartDiagnosisPage
+
+logger = get_logger("app")
 
 
 STYLESHEET = """
@@ -264,15 +282,20 @@ class MainWindow(QMainWindow):
         self.screen_mirror: ScreenMirror | None = None
         self.file_explorer_path = "/sdcard"
 
+        self.settings = SettingsStore()
+        self.current_case_id: int | None = None
+        self._hardware_task_refs = None  # keeps (thread, worker) alive while running
+
         self.setStyleSheet(STYLESHEET)
 
         self.build_ui()
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh_device_list)
-        self.timer.start(1500)
+        self.timer.start(int(self.settings.get("auto_refresh_ms", 1500)))
 
         self.refresh_device_list()
+        logger.info("Nexa Service Tool started")
 
     # ------------------------------------------------------------------
     # UI Construction
@@ -329,6 +352,11 @@ class MainWindow(QMainWindow):
             ("history", "Service History"),
             ("firmware", "Firmware & Flash"),
             ("hardware", "Hardware Test"),
+            ("smart", "Smart Diagnosis"),
+            ("cases", "Service Cases"),
+            ("recovery", "Recovery Assistant"),
+            ("reset", "Factory Reset"),
+            ("settings", "Settings"),
         ]
 
         for key, label in nav_items:
@@ -361,6 +389,11 @@ class MainWindow(QMainWindow):
         self.history_page = self.create_history_page()
         self.firmware_page = self.create_firmware_page()
         self.hardware_page = self.create_hardware_test_page()
+        self.smart_page = self.create_smart_diagnosis_page()
+        self.cases_page = self.create_service_cases_page()
+        self.recovery_page = self.create_recovery_page()
+        self.reset_page = self.create_factory_reset_page()
+        self.settings_page = self.create_settings_page()
 
         self.pages.addWidget(self.dashboard_page)
         self.pages.addWidget(self.device_page)
@@ -375,6 +408,11 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.history_page)
         self.pages.addWidget(self.firmware_page)
         self.pages.addWidget(self.hardware_page)
+        self.pages.addWidget(self.smart_page)
+        self.pages.addWidget(self.cases_page)
+        self.pages.addWidget(self.recovery_page)
+        self.pages.addWidget(self.reset_page)
+        self.pages.addWidget(self.settings_page)
 
         self.page_widgets = {
             "dashboard": self.dashboard_page,
@@ -390,6 +428,11 @@ class MainWindow(QMainWindow):
             "history": self.history_page,
             "firmware": self.firmware_page,
             "hardware": self.hardware_page,
+            "smart": self.smart_page,
+            "cases": self.cases_page,
+            "recovery": self.recovery_page,
+            "reset": self.reset_page,
+            "settings": self.settings_page,
         }
 
         root_layout.addWidget(sidebar)
@@ -422,6 +465,12 @@ class MainWindow(QMainWindow):
             self.refresh_firmware_info()
         elif key == "hardware":
             self.refresh_hardware_test_status()
+        elif key == "cases":
+            self.refresh_cases_table()
+        elif key == "recovery":
+            self.refresh_recovery_assessment()
+        elif key == "settings":
+            self.load_settings_form()
 
     # ------------------------------------------------------------------
     # Dashboard Page
@@ -576,24 +625,36 @@ class MainWindow(QMainWindow):
         if not self.current_serial:
             QMessageBox.warning(self, "No Device", "Connect and authorize an Android device first.")
             return
+
         self.hardware_run_button.setEnabled(False)
-        QApplication.processEvents()
-        try:
-            report = run_hardware_test(self.current_serial)
-            self.hardware_score.setText(f"{report.score} / 100")
-            self.hardware_summary.setText(
-                f"PASS {report.passed}  |  WARN {report.warnings}  |  FAIL {report.failed}"
-            )
-            self.hardware_table.setRowCount(len(report.results))
-            for row, item in enumerate(report.results):
-                values = [item.name, item.status, item.value, item.detail]
-                for col, value in enumerate(values):
-                    self.hardware_table.setItem(row, col, QTableWidgetItem(str(value)))
-            self.last_hardware_report = report
-        except Exception as exc:
-            QMessageBox.critical(self, "Hardware Test Error", str(exc))
-        finally:
-            self.hardware_run_button.setEnabled(True)
+        self.hardware_summary.setText("Running full hardware test...")
+
+        serial = self.current_serial
+        thread, worker = run_in_thread(self, run_hardware_test, serial)
+        self._hardware_task_refs = (thread, worker)
+
+        worker.finished.connect(self._on_hardware_test_finished)
+        worker.failed.connect(self._on_hardware_test_failed)
+
+    def _on_hardware_test_finished(self, report):
+        self.hardware_score.setText(f"{report.score} / 100")
+        self.hardware_summary.setText(
+            f"PASS {report.passed}  |  WARN {report.warnings}  |  FAIL {report.failed}"
+        )
+        self.hardware_table.setRowCount(len(report.results))
+        for row, item in enumerate(report.results):
+            values = [item.name, item.status, item.value, item.detail]
+            for col, value in enumerate(values):
+                self.hardware_table.setItem(row, col, QTableWidgetItem(str(value)))
+        self.last_hardware_report = report
+        self.hardware_run_button.setEnabled(True)
+        self._hardware_task_refs = None
+
+    def _on_hardware_test_failed(self, message: str):
+        logger.error("Hardware test failed: %s", message)
+        QMessageBox.critical(self, "Hardware Test Error", message)
+        self.hardware_run_button.setEnabled(True)
+        self._hardware_task_refs = None
 
     # ------------------------------------------------------------------
     # Device Page
@@ -2059,6 +2120,484 @@ class MainWindow(QMainWindow):
     # Placeholder Page
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Smart Diagnosis Page
+    # ------------------------------------------------------------------
+
+    def create_smart_diagnosis_page(self):
+        self.smart_diagnosis_widget = SmartDiagnosisPage(
+            facts_provider=self._collect_smart_diagnosis_facts
+        )
+        return self.smart_diagnosis_widget
+
+    def _collect_smart_diagnosis_facts(self) -> dict:
+        """Gather real facts from the currently selected device for Smart Diagnosis.
+
+        Best-effort: any single check failing (e.g. root check needs a shell
+        that isn't available) must not stop the others from being collected.
+        """
+        facts: dict = {}
+
+        if not self.current_serial:
+            facts["connection_state"] = "not_detected"
+            return facts
+
+        state = self.devices.get(self.current_serial, "not_detected")
+        facts["connection_state"] = state
+
+        if state != "device":
+            return facts
+
+        try:
+            diag = get_diagnostics(self.current_serial)
+            level = diag.battery_level.replace("%", "").strip()
+            if level.lstrip("-").isdigit():
+                facts["battery_percent"] = int(level)
+        except (ADBError, ValueError, AttributeError) as exc:
+            logger.warning("Smart diagnosis: gagal ambil battery info: %s", exc)
+
+        try:
+            network = get_network_info(self.current_serial)
+            facts["imei"] = network.imei
+        except ADBError as exc:
+            logger.warning("Smart diagnosis: gagal ambil network info: %s", exc)
+
+        try:
+            security = run_security_check(self.current_serial)
+            facts["root_detected"] = security.is_rooted
+        except ADBError as exc:
+            logger.warning("Smart diagnosis: gagal ambil security check: %s", exc)
+
+        if getattr(self, "last_hardware_report", None):
+            failed = [
+                item.name for item in self.last_hardware_report.results
+                if item.status == "FAIL"
+            ]
+            if failed:
+                facts["hardware_failures"] = failed
+
+        return facts
+
+    # ------------------------------------------------------------------
+    # Service Cases Page
+    # ------------------------------------------------------------------
+
+    def create_service_cases_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(14)
+
+        title = QLabel("Service Cases")
+        title.setObjectName("contentTitle")
+        desc = QLabel("Catat & lacak setiap job servis dari masuk sampai selesai.")
+        desc.setObjectName("muted")
+        layout.addWidget(title)
+        layout.addWidget(desc)
+
+        form_card = QFrame()
+        form_card.setObjectName("card")
+        form_layout = QVBoxLayout(form_card)
+        form_layout.setContentsMargins(20, 16, 20, 16)
+        form_layout.setSpacing(8)
+
+        form_title = QLabel("Case Baru")
+        form_title.setObjectName("cardTitle")
+        form_layout.addWidget(form_title)
+
+        self.case_customer_name = QLineEdit()
+        self.case_customer_name.setPlaceholderText("Nama customer *")
+        self.case_customer_phone = QLineEdit()
+        self.case_customer_phone.setPlaceholderText("No. HP customer")
+        self.case_complaint = QLineEdit()
+        self.case_complaint.setPlaceholderText("Keluhan (mis: layar retak, tidak mau nyala) *")
+        self.case_technician = QLineEdit()
+        self.case_technician.setPlaceholderText("Teknisi penanggung jawab")
+        self.case_cost = QLineEdit()
+        self.case_cost.setPlaceholderText("Estimasi biaya (Rp)")
+
+        for widget in (
+            self.case_customer_name, self.case_customer_phone,
+            self.case_complaint, self.case_technician, self.case_cost,
+        ):
+            form_layout.addWidget(widget)
+
+        self.case_use_current_device = QLabel("")
+        self.case_use_current_device.setObjectName("muted")
+        self.case_use_current_device.setWordWrap(True)
+        form_layout.addWidget(self.case_use_current_device)
+
+        self.case_save_button = QPushButton("Simpan Case Baru")
+        self.case_save_button.setObjectName("actionPrimary")
+        self.case_save_button.clicked.connect(self.create_new_case)
+        form_layout.addWidget(self.case_save_button)
+
+        layout.addWidget(form_card)
+
+        filter_row = QHBoxLayout()
+        self.case_search = QLineEdit()
+        self.case_search.setPlaceholderText("Cari nama customer / case number...")
+        self.case_status_filter = QComboBox()
+        self.case_status_filter.addItem("Semua Status")
+        for status in CASE_STATUSES:
+            self.case_status_filter.addItem(status)
+        self.case_refresh_button = QPushButton("Refresh")
+        self.case_refresh_button.clicked.connect(self.refresh_cases_table)
+        filter_row.addWidget(self.case_search, 2)
+        filter_row.addWidget(self.case_status_filter, 1)
+        filter_row.addWidget(self.case_refresh_button)
+        layout.addLayout(filter_row)
+
+        self.cases_table = QTableWidget(0, 6)
+        self.cases_table.setHorizontalHeaderLabels(
+            ["Case #", "Customer", "Device", "Complaint", "Status", "Updated"]
+        )
+        self.cases_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.cases_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.cases_table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.cases_table, 1)
+
+        action_row = QHBoxLayout()
+        self.case_update_status_button = QPushButton("Update Status")
+        self.case_update_status_button.clicked.connect(self.update_selected_case_status)
+        self.case_add_note_button = QPushButton("Tambah Catatan")
+        self.case_add_note_button.clicked.connect(self.add_note_to_selected_case)
+        action_row.addWidget(self.case_update_status_button)
+        action_row.addWidget(self.case_add_note_button)
+        action_row.addStretch()
+        layout.addLayout(action_row)
+
+        self.case_search.textChanged.connect(self.refresh_cases_table)
+        self.case_status_filter.currentIndexChanged.connect(self.refresh_cases_table)
+
+        return page
+
+    def create_new_case(self):
+        customer_name = self.case_customer_name.text().strip()
+        complaint = self.case_complaint.text().strip()
+
+        if not customer_name or not complaint:
+            QMessageBox.warning(self, "Data Kurang", "Nama customer dan keluhan wajib diisi.")
+            return
+
+        try:
+            cost_text = self.case_cost.text().strip().replace(".", "").replace(",", "")
+            cost = float(cost_text) if cost_text else 0
+        except ValueError:
+            QMessageBox.warning(self, "Biaya Tidak Valid", "Estimasi biaya harus berupa angka.")
+            return
+
+        device = self.current_device
+        try:
+            case = create_case(
+                customer_name=customer_name,
+                complaint=complaint,
+                customer_phone=self.case_customer_phone.text().strip(),
+                device_serial=device.serial if device else "",
+                manufacturer=device.manufacturer if device else "",
+                model=device.model if device else "",
+                technician=self.case_technician.text().strip(),
+                estimated_cost=cost,
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Gagal Menyimpan Case", str(exc))
+            return
+
+        logger.info("Service case dibuat: %s", case.case_number)
+        QMessageBox.information(self, "Case Dibuat", f"Case {case.case_number} berhasil disimpan.")
+
+        for widget in (
+            self.case_customer_name, self.case_customer_phone,
+            self.case_complaint, self.case_technician, self.case_cost,
+        ):
+            widget.clear()
+
+        self.refresh_cases_table()
+
+    def refresh_cases_table(self):
+        status_text = self.case_status_filter.currentText()
+        status = None if status_text == "Semua Status" else status_text
+        search = self.case_search.text().strip()
+
+        try:
+            cases = list_cases(status=status, search=search)
+        except Exception as exc:
+            logger.error("Gagal memuat service cases: %s", exc)
+            return
+
+        self.cases_table.setRowCount(len(cases))
+        for row, case in enumerate(cases):
+            device_label = f"{case.manufacturer} {case.model}".strip() or "-"
+            values = [
+                case.case_number, case.customer_name, device_label,
+                case.complaint, case.status, case.updated_at,
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setData(Qt.UserRole, case.id)
+                self.cases_table.setItem(row, col, item)
+
+    def _selected_case_id(self) -> int | None:
+        row = self.cases_table.currentRow()
+        if row < 0:
+            return None
+        item = self.cases_table.item(row, 0)
+        return item.data(Qt.UserRole) if item else None
+
+    def update_selected_case_status(self):
+        case_id = self._selected_case_id()
+        if case_id is None:
+            QMessageBox.information(self, "Pilih Case", "Pilih case dari tabel dulu.")
+            return
+
+        status, ok = QInputDialog.getItem(
+            self, "Update Status", "Status baru:", list(CASE_STATUSES), 0, False
+        )
+        if not ok:
+            return
+
+        note, _ = QInputDialog.getText(self, "Catatan (opsional)", "Catatan perubahan status:")
+
+        try:
+            update_case_status(case_id, status, note.strip())
+        except ValueError as exc:
+            QMessageBox.warning(self, "Gagal Update", str(exc))
+            return
+
+        self.refresh_cases_table()
+
+    def add_note_to_selected_case(self):
+        case_id = self._selected_case_id()
+        if case_id is None:
+            QMessageBox.information(self, "Pilih Case", "Pilih case dari tabel dulu.")
+            return
+
+        note, ok = QInputDialog.getMultiLineText(self, "Tambah Catatan", "Catatan:")
+        if not ok or not note.strip():
+            return
+
+        add_case_note(case_id, note.strip())
+        QMessageBox.information(self, "Catatan Ditambahkan", "Catatan berhasil disimpan ke case ini.")
+
+    # ------------------------------------------------------------------
+    # Recovery Assistant Page (locked / inaccessible devices)
+    #
+    # Read-only guidance only. Never bypasses PIN/pattern/password/FRP --
+    # this deliberately mirrors the safety guarantees already enforced in
+    # core/recovery_actions.py, core/device_access_recovery.py, and
+    # core/locked_device_recovery.py.
+    # ------------------------------------------------------------------
+
+    def create_recovery_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(14)
+
+        title = QLabel("Recovery Assistant")
+        title.setObjectName("contentTitle")
+        desc = QLabel(
+            "Bantuan untuk device yang tidak bisa diakses (lupa PIN, unauthorized, "
+            "bootloop). Nexa TIDAK melakukan bypass PIN/pattern/password/FRP -- "
+            "hanya memberi panduan jalur resmi."
+        )
+        desc.setObjectName("muted")
+        desc.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(desc)
+
+        card = QFrame()
+        card.setObjectName("card")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(22, 20, 22, 20)
+        card_layout.setSpacing(9)
+
+        self.recovery_status = QLabel("Belum ada device dipilih.")
+        self.recovery_status.setObjectName("status")
+        self.recovery_recommended = QLabel("")
+        self.recovery_recommended.setObjectName("value")
+        self.recovery_recommended.setWordWrap(True)
+        self.recovery_warning = QLabel("")
+        self.recovery_warning.setObjectName("value")
+        self.recovery_warning.setWordWrap(True)
+
+        card_layout.addWidget(self.recovery_status)
+        card_layout.addWidget(self.recovery_recommended)
+        card_layout.addWidget(self.recovery_warning)
+        layout.addWidget(card)
+
+        plan_title = QLabel("Rencana Pemulihan (Locked Device Plan)")
+        plan_title.setObjectName("cardTitle")
+        layout.addWidget(plan_title)
+
+        self.recovery_plan_text = QTextEdit()
+        self.recovery_plan_text.setObjectName("value")
+        self.recovery_plan_text.setReadOnly(True)
+        self.recovery_plan_text.setFixedHeight(160)
+        layout.addWidget(self.recovery_plan_text)
+
+        self.recovery_refresh_button = QPushButton("Jalankan Assessment")
+        self.recovery_refresh_button.setObjectName("actionPrimary")
+        self.recovery_refresh_button.clicked.connect(self.refresh_recovery_assessment)
+        layout.addWidget(self.recovery_refresh_button)
+        layout.addStretch()
+
+        return page
+
+    def refresh_recovery_assessment(self):
+        if not self.current_serial:
+            self.recovery_status.setText("Tidak ada device terhubung.")
+            self.recovery_recommended.setText("")
+            self.recovery_warning.setText("")
+            self.recovery_plan_text.setPlainText(
+                "\n".join(
+                    f"- {action}"
+                    for action in plan_locked_device(adb_state="not_detected").actions
+                )
+            )
+            return
+
+        state = self.devices.get(self.current_serial, "not_detected")
+
+        try:
+            assessment = assess_access(self.current_serial)
+            self.recovery_status.setText(f"State ADB: {assessment.adb_state}")
+            self.recovery_recommended.setText(f"Rekomendasi: {assessment.recommended_path}")
+            self.recovery_warning.setText(f"Catatan: {assessment.warning}")
+        except ADBError as exc:
+            self.recovery_status.setText("Gagal menilai akses.")
+            self.recovery_recommended.setText(str(exc))
+            self.recovery_warning.setText("")
+
+        access_report = diagnose_access_issue({"adb_state": state})
+        plan = plan_locked_device(adb_state=state)
+
+        lines = [f"[{plan.title}]"]
+        lines.extend(f"- {action}" for action in plan.actions)
+        if getattr(access_report, "findings", None):
+            lines.append("")
+            lines.append("Findings tambahan:")
+            for finding in access_report.findings:
+                lines.append(f"- [{finding.severity.upper()}] {finding.title}: {finding.action}")
+
+        self.recovery_plan_text.setPlainText("\n".join(lines))
+
+    # ------------------------------------------------------------------
+    # Factory Reset Assistant Page
+    # ------------------------------------------------------------------
+
+    def create_factory_reset_page(self):
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        model = "Unknown device"
+        self.factory_reset_panel = FactoryResetAssistantPanel(model=model)
+        layout.addWidget(self.factory_reset_panel)
+
+        return wrapper
+
+    # ------------------------------------------------------------------
+    # Settings Page
+    # ------------------------------------------------------------------
+
+    def create_settings_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(14)
+
+        title = QLabel("Settings")
+        title.setObjectName("contentTitle")
+        desc = QLabel("Preferensi aplikasi Nexa Service Tool.")
+        desc.setObjectName("muted")
+        layout.addWidget(title)
+        layout.addWidget(desc)
+
+        card = QFrame()
+        card.setObjectName("card")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(22, 20, 22, 20)
+        card_layout.setSpacing(10)
+
+        refresh_label = QLabel("Auto-refresh device list (ms)")
+        refresh_label.setObjectName("muted")
+        self.settings_refresh_ms = QLineEdit()
+        card_layout.addWidget(refresh_label)
+        card_layout.addWidget(self.settings_refresh_ms)
+
+        loglevel_label = QLabel("Log level")
+        loglevel_label.setObjectName("muted")
+        self.settings_log_level = QComboBox()
+        self.settings_log_level.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
+        card_layout.addWidget(loglevel_label)
+        card_layout.addWidget(self.settings_log_level)
+
+        self.settings_confirm_dangerous = QPushButton("Konfirmasi aksi berbahaya: ON")
+        self.settings_confirm_dangerous.setCheckable(True)
+        self.settings_confirm_dangerous.clicked.connect(self._toggle_confirm_dangerous_label)
+        card_layout.addWidget(self.settings_confirm_dangerous)
+
+        self.settings_mask_identifiers = QPushButton("Sembunyikan IMEI/Serial sensitif: ON")
+        self.settings_mask_identifiers.setCheckable(True)
+        self.settings_mask_identifiers.clicked.connect(self._toggle_mask_identifiers_label)
+        card_layout.addWidget(self.settings_mask_identifiers)
+
+        layout.addWidget(card)
+
+        self.settings_save_button = QPushButton("Simpan Settings")
+        self.settings_save_button.setObjectName("actionPrimary")
+        self.settings_save_button.clicked.connect(self.save_settings_form)
+        layout.addWidget(self.settings_save_button)
+        layout.addStretch()
+
+        return page
+
+    def _toggle_confirm_dangerous_label(self, checked: bool):
+        self.settings_confirm_dangerous.setText(
+            f"Konfirmasi aksi berbahaya: {'ON' if checked else 'OFF'}"
+        )
+
+    def _toggle_mask_identifiers_label(self, checked: bool):
+        self.settings_mask_identifiers.setText(
+            f"Sembunyikan IMEI/Serial sensitif: {'ON' if checked else 'OFF'}"
+        )
+
+    def load_settings_form(self):
+        self.settings_refresh_ms.setText(str(self.settings.get("auto_refresh_ms", 1500)))
+
+        log_level = self.settings.get("log_level", "INFO")
+        idx = self.settings_log_level.findText(log_level)
+        self.settings_log_level.setCurrentIndex(idx if idx >= 0 else 1)
+
+        confirm = bool(self.settings.get("confirm_dangerous_actions", True))
+        self.settings_confirm_dangerous.setChecked(confirm)
+        self._toggle_confirm_dangerous_label(confirm)
+
+        mask = bool(self.settings.get("mask_sensitive_identifiers", True))
+        self.settings_mask_identifiers.setChecked(mask)
+        self._toggle_mask_identifiers_label(mask)
+
+    def save_settings_form(self):
+        try:
+            refresh_ms = int(self.settings_refresh_ms.text().strip())
+            if refresh_ms < 250:
+                raise ValueError("Auto-refresh minimal 250ms.")
+        except ValueError as exc:
+            QMessageBox.warning(self, "Nilai Tidak Valid", str(exc) or "Auto-refresh harus berupa angka.")
+            return
+
+        self.settings.update({
+            "auto_refresh_ms": refresh_ms,
+            "log_level": self.settings_log_level.currentText(),
+            "confirm_dangerous_actions": self.settings_confirm_dangerous.isChecked(),
+            "mask_sensitive_identifiers": self.settings_mask_identifiers.isChecked(),
+        })
+
+        self.timer.setInterval(refresh_ms)
+        logger.info("Settings disimpan: refresh=%sms, log_level=%s", refresh_ms, self.settings_log_level.currentText())
+        QMessageBox.information(self, "Settings Disimpan", "Preferensi berhasil disimpan.")
+
     def create_placeholder_page(self, title_text: str, desc_text: str):
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -2205,6 +2744,9 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == "__main__":
+    configure_logging()
+    logger.info("Launching Nexa Service Tool")
+
     app = QApplication(sys.argv)
 
     window = MainWindow()
