@@ -441,5 +441,6 @@ def detect_locked_device_recovery_state(
         recovery_options=recovery_options,
         supported_actions=supported_actions,
         confirmation_required=confirmation_required,
+        recommended_tools=recommended_tools,
         message=message,
     )
