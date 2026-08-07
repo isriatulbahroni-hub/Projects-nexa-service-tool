@@ -39,6 +39,7 @@ from core.diagnostics import (
     health_score_label,
 )
 from core.database import get_history, save_service_record
+from core.device_diagnostics import run_device_diagnostics
 from core.logcat import LogcatStreamer
 from core.report import generate_service_report
 from core.packages import (
@@ -86,7 +87,23 @@ from core.service_cases import (
 )
 from core.recovery_actions import assess_access, factory_reset_guidance
 from core.device_access_recovery import diagnose_access_issue
-from core.locked_device_recovery import plan_locked_device
+from core.locked_device_recovery import (
+    LockedDeviceRecoveryState,
+    detect_locked_device_recovery_state,
+    plan_locked_device,
+)
+from core.frp_verification import (
+    collect_frp_verification,
+    FRPVerificationError,
+)
+from core.frp_service import (
+    FRPServiceError,
+    collect_fastboot_variables,
+    detect_frp_service_state,
+    execute_bootloader_reboot,
+    execute_recovery_reboot,
+    verify_frp_result,
+)
 from core.factory_reset_ui import FactoryResetAssistantPanel
 from ui.smart_diagnosis_page import SmartDiagnosisPage
 
@@ -292,6 +309,7 @@ class MainWindow(QMainWindow):
         self.devices: dict[str, str] = {}
         self.current_serial: str | None = None
         self.current_device = None
+        self._current_locked_state: LockedDeviceRecoveryState | None = None
         self.last_diag = None
         self.last_score = None
         self.last_recommendations: list[str] = []
@@ -514,6 +532,7 @@ class MainWindow(QMainWindow):
             self.refresh_cases_table()
         elif key == "recovery":
             self.refresh_recovery_assessment()
+            self.refresh_locked_device_state()
         elif key == "settings":
             self.load_settings_form()
 
@@ -907,11 +926,11 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(32, 28, 32, 28)
         layout.setSpacing(18)
 
-        title = QLabel("Smart Diagnostics")
+        title = QLabel("Device Diagnostics")
         title.setObjectName("contentTitle")
 
         desc = QLabel(
-            "Status baterai, storage, layar, plus skor kesehatan otomatis."
+            "Komprehensif diagnostics perangkat: ADB, boot, battery, storage, software, dan network."
         )
         desc.setObjectName("muted")
 
@@ -968,6 +987,16 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(row)
 
+        self.diag_table = QTableWidget(0, 5)
+        self.diag_table.setHorizontalHeaderLabels(
+            ["Category", "Check", "Status", "Value", "Detail"]
+        )
+        self.diag_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.diag_table.setSelectionMode(QTableWidget.NoSelection)
+        self.diag_table.horizontalHeader().setStretchLastSection(True)
+        self.diag_table.setMinimumHeight(260)
+        layout.addWidget(self.diag_table)
+
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
 
@@ -1009,8 +1038,9 @@ class MainWindow(QMainWindow):
 
         def task():
             diag = get_diagnostics(serial)
+            report = run_device_diagnostics(serial)
             score, recommendations = compute_health_score(diag)
-            return diag, score, recommendations
+            return diag, report, score, recommendations
 
         self._diag_worker = AsyncWorker(task, self)
         self._diag_worker.succeeded.connect(self._on_diagnostics_ready)
@@ -1018,14 +1048,16 @@ class MainWindow(QMainWindow):
         self._diag_worker.start()
 
     def _on_diagnostics_ready(self, result):
-        diag, score, recommendations = result
+        diag, report, score, recommendations = result
 
         self.last_diag = diag
+        self.last_report = report
         self.last_score = score
         self.last_recommendations = recommendations
 
         self.diag_status.setText("✅ Diagnostics OK")
         self.diag_info.setText(
+            f"{report.summary}\n"
             f"Battery Level    : {diag.battery_level}\n"
             f"Battery Status   : {diag.battery_status}\n"
             f"Battery Health   : {diag.battery_health}\n"
@@ -1033,6 +1065,16 @@ class MainWindow(QMainWindow):
             f"Screen State     : {diag.screen_state}\n"
             f"USB Debugging    : {diag.usb_debugging}"
         )
+
+        self.diag_table.setRowCount(len(report.items))
+        for row_index, item in enumerate(report.items):
+            self.diag_table.setItem(row_index, 0, QTableWidgetItem(item.category))
+            self.diag_table.setItem(row_index, 1, QTableWidgetItem(item.name))
+            self.diag_table.setItem(row_index, 2, QTableWidgetItem(item.status.value))
+            self.diag_table.setItem(row_index, 3, QTableWidgetItem(item.value))
+            self.diag_table.setItem(row_index, 4, QTableWidgetItem(item.detail))
+
+        self.diag_table.resizeColumnsToContents()
 
         self.diag_score_value.setText(
             f"{score}  ({health_score_label(score)})"
@@ -2602,16 +2644,21 @@ class MainWindow(QMainWindow):
 
         title = QLabel("Recovery Assistant")
         title.setObjectName("contentTitle")
+
         desc = QLabel(
-            "Bantuan untuk device yang tidak bisa diakses (lupa PIN, unauthorized, "
-            "bootloop). Nexa TIDAK melakukan bypass PIN/pattern/password/FRP -- "
-            "hanya memberi panduan jalur resmi."
+            "Assessment read-only untuk device yang tidak bisa diakses. "
+            "Nexa tidak melakukan bypass PIN/pattern/password/FRP. "
+            "Gunakan verifikasi kepemilikan resmi sebelum tindakan lanjutan."
         )
         desc.setObjectName("muted")
         desc.setWordWrap(True)
+
         layout.addWidget(title)
         layout.addWidget(desc)
 
+        # --------------------------------------------------------
+        # Access / Recovery Assessment
+        # --------------------------------------------------------
         card = QFrame()
         card.setObjectName("card")
         card_layout = QVBoxLayout(card)
@@ -2620,9 +2667,11 @@ class MainWindow(QMainWindow):
 
         self.recovery_status = QLabel("Belum ada device dipilih.")
         self.recovery_status.setObjectName("status")
+
         self.recovery_recommended = QLabel("")
         self.recovery_recommended.setObjectName("value")
         self.recovery_recommended.setWordWrap(True)
+
         self.recovery_warning = QLabel("")
         self.recovery_warning.setObjectName("value")
         self.recovery_warning.setWordWrap(True)
@@ -2630,9 +2679,245 @@ class MainWindow(QMainWindow):
         card_layout.addWidget(self.recovery_status)
         card_layout.addWidget(self.recovery_recommended)
         card_layout.addWidget(self.recovery_warning)
+
         layout.addWidget(card)
 
-        plan_title = QLabel("Rencana Pemulihan (Locked Device Plan)")
+        # --------------------------------------------------------
+        # FRP / Owner Verification - READ ONLY
+        # --------------------------------------------------------
+        frp_title = QLabel("FRP / Owner Verification")
+        frp_title.setObjectName("cardTitle")
+        layout.addWidget(frp_title)
+
+        frp_card = QFrame()
+        frp_card.setObjectName("card")
+        frp_layout = QVBoxLayout(frp_card)
+        frp_layout.setContentsMargins(22, 20, 22, 20)
+        frp_layout.setSpacing(8)
+
+        self.frp_status_label = QLabel(
+            "FRP Status: Belum diperiksa"
+        )
+        self.frp_status_label.setObjectName("status")
+
+        self.frp_owner_label = QLabel(
+            "Owner Verification: -"
+        )
+        self.frp_owner_label.setObjectName("value")
+
+        self.frp_device_label = QLabel(
+            "Device: -"
+        )
+        self.frp_device_label.setObjectName("value")
+
+        self.frp_setup_label = QLabel(
+            "Setup Wizard: -"
+        )
+        self.frp_setup_label.setObjectName("value")
+
+        self.frp_provisioned_label = QLabel(
+            "Device Provisioned: -"
+        )
+        self.frp_provisioned_label.setObjectName("value")
+
+        self.frp_indicator_label = QLabel(
+            "FRP Provisioned Indicator: -"
+        )
+        self.frp_indicator_label.setObjectName("value")
+
+        self.frp_bootloader_label = QLabel(
+            "Bootloader: -"
+        )
+        self.frp_bootloader_label.setObjectName("value")
+
+        self.frp_verified_boot_label = QLabel(
+            "Verified Boot: -"
+        )
+        self.frp_verified_boot_label.setObjectName("value")
+
+        self.frp_service_state_label = QLabel(
+            "Service State: -"
+        )
+        self.frp_service_state_label.setObjectName("value")
+
+        self.frp_fastboot_label = QLabel(
+            "Fastboot: -"
+        )
+        self.frp_fastboot_label.setObjectName("value")
+
+        self.frp_fastboot_info_label = QLabel(
+            "Fastboot vars: -"
+        )
+        self.frp_fastboot_info_label.setObjectName("value")
+        self.frp_fastboot_info_label.setWordWrap(True)
+
+        self.frp_service_message_label = QLabel("")
+        self.frp_service_message_label.setObjectName("muted")
+        self.frp_service_message_label.setWordWrap(True)
+
+        self.frp_brand_label = QLabel("Brand/Family: -")
+        self.frp_brand_label.setObjectName("value")
+
+        self.frp_model_label = QLabel("Model: -")
+        self.frp_model_label.setObjectName("value")
+
+        self.frp_guidance_label = QLabel("Workflow Guidance: -")
+        self.frp_guidance_label.setObjectName("muted")
+        self.frp_guidance_label.setWordWrap(True)
+
+        self.frp_message_label = QLabel("")
+        self.frp_message_label.setObjectName("muted")
+        self.frp_message_label.setWordWrap(True)
+
+        self.frp_operation_message_label = QLabel("")
+        self.frp_operation_message_label.setObjectName("muted")
+        self.frp_operation_message_label.setWordWrap(True)
+
+        for widget in (
+            self.frp_status_label,
+            self.frp_owner_label,
+            self.frp_device_label,
+            self.frp_brand_label,
+            self.frp_model_label,
+            self.frp_setup_label,
+            self.frp_provisioned_label,
+            self.frp_indicator_label,
+            self.frp_bootloader_label,
+            self.frp_verified_boot_label,
+            self.frp_service_state_label,
+            self.frp_fastboot_label,
+            self.frp_fastboot_info_label,
+            self.frp_message_label,
+            self.frp_service_message_label,
+            self.frp_guidance_label,
+            self.frp_operation_message_label,
+        ):
+            frp_layout.addWidget(widget)
+
+        self.frp_refresh_button = QPushButton(
+            "Refresh FRP / Owner Verification"
+        )
+        self.frp_refresh_button.setObjectName("action")
+        self.frp_refresh_button.clicked.connect(
+            self.refresh_frp_verification
+        )
+        frp_layout.addWidget(self.frp_refresh_button)
+
+        self.frp_service_refresh_button = QPushButton(
+            "Refresh FRP Service State"
+        )
+        self.frp_service_refresh_button.setObjectName("action")
+        self.frp_service_refresh_button.clicked.connect(
+            self.refresh_frp_service_state
+        )
+        frp_layout.addWidget(self.frp_service_refresh_button)
+
+        self.frp_recovery_button = QPushButton("Reboot ke Recovery")
+        self.frp_recovery_button.setObjectName("action")
+        self.frp_recovery_button.setEnabled(False)
+        self.frp_recovery_button.clicked.connect(self.reboot_to_recovery)
+        frp_layout.addWidget(self.frp_recovery_button)
+
+        self.frp_bootloader_button = QPushButton("Reboot ke Bootloader")
+        self.frp_bootloader_button.setObjectName("action")
+        self.frp_bootloader_button.setEnabled(False)
+        self.frp_bootloader_button.clicked.connect(
+            self.reboot_to_bootloader
+        )
+        frp_layout.addWidget(self.frp_bootloader_button)
+
+        self.frp_verify_button = QPushButton("Verify FRP Result")
+        self.frp_verify_button.setObjectName("action")
+        self.frp_verify_button.setEnabled(False)
+        self.frp_verify_button.clicked.connect(self.verify_frp_result_action)
+        frp_layout.addWidget(self.frp_verify_button)
+
+        layout.addWidget(frp_card)
+
+        # --------------------------------------------------------
+        # Locked Device Recovery Workflow
+        # --------------------------------------------------------
+        recovery_title = QLabel("Locked Device Recovery Workflow")
+        recovery_title.setObjectName("cardTitle")
+        layout.addWidget(recovery_title)
+
+        recovery_card = QFrame()
+        recovery_card.setObjectName("card")
+        recovery_layout = QVBoxLayout(recovery_card)
+        recovery_layout.setContentsMargins(22, 20, 22, 20)
+        recovery_layout.setSpacing(8)
+
+        self.locked_state_label = QLabel("Locked Recovery State: -")
+        self.locked_state_label.setObjectName("status")
+
+        self.locked_identity_label = QLabel("Device Identity: -")
+        self.locked_identity_label.setObjectName("value")
+
+        self.locked_mode_label = QLabel("Mode: -")
+        self.locked_mode_label.setObjectName("value")
+
+        self.locked_options_label = QLabel("Recovery Options: -")
+        self.locked_options_label.setObjectName("muted")
+        self.locked_options_label.setWordWrap(True)
+
+        self.locked_supported_label = QLabel("Supported Actions: -")
+        self.locked_supported_label.setObjectName("value")
+
+        self.locked_confirm_label = QLabel("Confirmation: -")
+        self.locked_confirm_label.setObjectName("value")
+
+        self.locked_action_message_label = QLabel("")
+        self.locked_action_message_label.setObjectName("muted")
+        self.locked_action_message_label.setWordWrap(True)
+
+        for widget in (
+            self.locked_state_label,
+            self.locked_identity_label,
+            self.locked_mode_label,
+            self.locked_options_label,
+            self.locked_supported_label,
+            self.locked_confirm_label,
+            self.locked_action_message_label,
+        ):
+            recovery_layout.addWidget(widget)
+
+        self.locked_detect_button = QPushButton("Detect Locked Device State")
+        self.locked_detect_button.setObjectName("action")
+        self.locked_detect_button.clicked.connect(self.refresh_locked_device_state)
+        recovery_layout.addWidget(self.locked_detect_button)
+
+        self.locked_confirm_button = QPushButton("Confirm Recovery Action")
+        self.locked_confirm_button.setObjectName("action")
+        self.locked_confirm_button.setEnabled(False)
+        self.locked_confirm_button.clicked.connect(self.confirm_recovery_action)
+        recovery_layout.addWidget(self.locked_confirm_button)
+
+        self.locked_recovery_button = QPushButton("Reboot ke Recovery (Locked Device)")
+        self.locked_recovery_button.setObjectName("action")
+        self.locked_recovery_button.setEnabled(False)
+        self.locked_recovery_button.clicked.connect(self.reboot_locked_recovery)
+        recovery_layout.addWidget(self.locked_recovery_button)
+
+        self.locked_bootloader_button = QPushButton("Reboot ke Bootloader (Locked Device)")
+        self.locked_bootloader_button.setObjectName("action")
+        self.locked_bootloader_button.setEnabled(False)
+        self.locked_bootloader_button.clicked.connect(self.reboot_locked_bootloader)
+        recovery_layout.addWidget(self.locked_bootloader_button)
+
+        self.locked_verify_button = QPushButton("Verify Locked Device Result")
+        self.locked_verify_button.setObjectName("action")
+        self.locked_verify_button.setEnabled(False)
+        self.locked_verify_button.clicked.connect(self.verify_locked_result)
+        recovery_layout.addWidget(self.locked_verify_button)
+
+        layout.addWidget(recovery_card)
+
+        # --------------------------------------------------------
+        # Recovery Plan
+        # --------------------------------------------------------
+        plan_title = QLabel(
+            "Rencana Pemulihan (Locked Device Plan)"
+        )
         plan_title.setObjectName("cardTitle")
         layout.addWidget(plan_title)
 
@@ -2642,13 +2927,551 @@ class MainWindow(QMainWindow):
         self.recovery_plan_text.setFixedHeight(160)
         layout.addWidget(self.recovery_plan_text)
 
-        self.recovery_refresh_button = QPushButton("Jalankan Assessment")
-        self.recovery_refresh_button.setObjectName("actionPrimary")
-        self.recovery_refresh_button.clicked.connect(self.refresh_recovery_assessment)
+        self.recovery_refresh_button = QPushButton(
+            "Jalankan Assessment"
+        )
+        self.recovery_refresh_button.setObjectName(
+            "actionPrimary"
+        )
+        self.recovery_refresh_button.clicked.connect(
+            self.refresh_recovery_assessment
+        )
         layout.addWidget(self.recovery_refresh_button)
+
         layout.addStretch()
 
         return page
+
+    def refresh_frp_verification(self):
+        """Run read-only FRP/owner verification on active device."""
+
+        if not self.current_serial:
+            self.frp_status_label.setText(
+                "FRP Status: Tidak ada device"
+            )
+            self.frp_owner_label.setText(
+                "Owner Verification: -"
+            )
+            self.frp_device_label.setText(
+                "Device: -"
+            )
+            self.frp_message_label.setText(
+                "Hubungkan dan authorize device melalui ADB terlebih dahulu."
+            )
+            return
+
+        serial = self.current_serial
+
+        self.frp_status_label.setText(
+            "FRP Status: Memeriksa..."
+        )
+        self.frp_owner_label.setText(
+            "Owner Verification: Memeriksa..."
+        )
+        self.frp_message_label.setText(
+            "Menjalankan pemeriksaan ADB read-only..."
+        )
+        self.frp_refresh_button.setEnabled(False)
+
+        try:
+            result = collect_frp_verification(serial)
+
+            self.frp_status_label.setText(
+                f"FRP Status: {result.frp_status}"
+            )
+
+            owner_text = (
+                "REQUIRED"
+                if result.owner_verification_required
+                else "NOT REQUIRED"
+            )
+
+            self.frp_owner_label.setText(
+                f"Owner Verification: {owner_text}"
+            )
+
+            self.frp_device_label.setText(
+                f"Device: {result.manufacturer} "
+                f"{result.model} | Android {result.android_version}"
+            )
+
+            setup_text = (
+                "COMPLETE"
+                if result.setup_complete is True
+                else "INCOMPLETE"
+                if result.setup_complete is False
+                else "UNKNOWN"
+            )
+
+            self.frp_setup_label.setText(
+                f"Setup Wizard: {setup_text}"
+            )
+
+            provisioned_text = (
+                "YES"
+                if result.device_provisioned is True
+                else "NO"
+                if result.device_provisioned is False
+                else "UNKNOWN"
+            )
+
+            self.frp_provisioned_label.setText(
+                f"Device Provisioned: {provisioned_text}"
+            )
+
+            self.frp_indicator_label.setText(
+                "FRP Provisioned Indicator: "
+                f"{result.frp_provisioned}"
+            )
+
+            self.frp_bootloader_label.setText(
+                f"Bootloader: {result.bootloader_locked}"
+            )
+
+            self.frp_verified_boot_label.setText(
+                f"Verified Boot: {result.verified_boot_state}"
+            )
+
+            self.frp_message_label.setText(
+                f"Catatan: {result.message}"
+            )
+
+        except FRPVerificationError as exc:
+            self.frp_status_label.setText(
+                "FRP Status: ERROR"
+            )
+            self.frp_owner_label.setText(
+                "Owner Verification: UNKNOWN"
+            )
+            self.frp_message_label.setText(str(exc))
+
+        except Exception as exc:
+            logger.exception(
+                "FRP verification UI failed"
+            )
+            self.frp_status_label.setText(
+                "FRP Status: ERROR"
+            )
+            self.frp_owner_label.setText(
+                "Owner Verification: UNKNOWN"
+            )
+            self.frp_message_label.setText(
+                f"Gagal melakukan verifikasi: {exc}"
+            )
+
+        finally:
+            self.frp_refresh_button.setEnabled(True)
+            self.frp_service_refresh_button.setEnabled(True)
+
+    def refresh_frp_service_state(self):
+        if not self.current_serial:
+            self.frp_service_state_label.setText("Service State: Tidak ada device")
+            self.frp_fastboot_label.setText("Fastboot: -")
+            self.frp_service_message_label.setText(
+                "Hubungkan dan authorize device melalui ADB terlebih dahulu."
+            )
+            self.frp_recovery_button.setEnabled(False)
+            self.frp_bootloader_button.setEnabled(False)
+            self.frp_verify_button.setEnabled(False)
+            return
+
+        serial = self.current_serial
+        self.frp_service_state_label.setText("Service State: Memeriksa...")
+        self.frp_fastboot_label.setText("Fastboot: Memeriksa...")
+        self.frp_service_message_label.setText(
+            "Menjalankan deteksi FRP service nyata..."
+        )
+        self.frp_operation_message_label.setText("")
+        self.frp_refresh_button.setEnabled(False)
+        self.frp_service_refresh_button.setEnabled(False)
+        self.frp_recovery_button.setEnabled(False)
+        self.frp_bootloader_button.setEnabled(False)
+        self.frp_verify_button.setEnabled(False)
+
+        if getattr(self, "_frp_service_worker", None) and self._frp_service_worker.isRunning():
+            return
+
+        self._frp_service_worker = AsyncWorker(
+            lambda: detect_frp_service_state(serial),
+            self,
+        )
+        self._frp_service_worker.succeeded.connect(
+            self._on_frp_service_state_ready
+        )
+        self._frp_service_worker.failed.connect(
+            self._on_frp_service_state_error
+        )
+        self._frp_service_worker.start()
+
+    def _on_frp_service_state_ready(self, state):
+        self.frp_service_state_label.setText(
+            f"Service State: {state.adb_state}"
+        )
+        self.frp_fastboot_label.setText(
+            "Fastboot: Connected" if state.fastboot_connected else "Fastboot: Not connected"
+        )
+        self.frp_service_message_label.setText(state.message)
+        self.frp_brand_label.setText(f"Brand/Family: {state.brand_group}")
+        self.frp_model_label.setText(
+            f"Model: {state.device_properties.get('model', 'Unknown')}"
+        )
+        self.frp_guidance_label.setText(
+            "Workflow Guidance: " + " ".join(state.workflow_guidance)
+        )
+        self.frp_operation_message_label.setText(
+            "Supported: " + ", ".join(state.supported_operations)
+            if state.supported_operations
+            else "Supported: none"
+        )
+
+        if state.authorized and not state.owner_auth_required:
+            self.frp_recovery_button.setEnabled(True)
+            self.frp_bootloader_button.setEnabled(True)
+            self.frp_verify_button.setEnabled(True)
+        else:
+            self.frp_recovery_button.setEnabled(False)
+            self.frp_bootloader_button.setEnabled(False)
+            self.frp_verify_button.setEnabled(state.authorized)
+
+        if state.fastboot_vars:
+            vars_preview = []
+            for key in [
+                "version-bootloader",
+                "product",
+                "model",
+                "secure",
+                "unlocked",
+            ]:
+                if key in state.fastboot_vars:
+                    vars_preview.append(f"{key}={state.fastboot_vars[key]}")
+            self.frp_fastboot_info_label.setText(
+                ", ".join(vars_preview) if vars_preview else "Fastboot vars available"
+            )
+        else:
+            self.frp_fastboot_info_label.setText("Fastboot vars: -")
+
+        if state.owner_auth_required:
+            self.frp_operation_message_label.setText(
+                "REQUIRES OWNER/OEM AUTHORIZATION"
+            )
+
+        self.frp_refresh_button.setEnabled(True)
+        self.frp_service_refresh_button.setEnabled(True)
+
+    def _on_frp_service_state_error(self, message: str):
+        self.frp_service_state_label.setText("Service State: ERROR")
+        self.frp_service_message_label.setText(message)
+        self.frp_operation_message_label.setText("REQUIRES OWNER/OEM AUTHORIZATION")
+        self.frp_recovery_button.setEnabled(False)
+        self.frp_bootloader_button.setEnabled(False)
+        self.frp_verify_button.setEnabled(False)
+        self.frp_refresh_button.setEnabled(True)
+        self.frp_service_refresh_button.setEnabled(True)
+
+    def reboot_to_recovery(self):
+        if not self.current_serial:
+            return
+
+        self.frp_operation_message_label.setText("Executing reboot to recovery...")
+        self.frp_recovery_button.setEnabled(False)
+        self.frp_bootloader_button.setEnabled(False)
+        self.frp_verify_button.setEnabled(False)
+
+        worker = AsyncWorker(
+            lambda: execute_recovery_reboot(self.current_serial),
+            self,
+        )
+        worker.succeeded.connect(
+            lambda result: self._on_frp_action_complete(
+                result,
+                "Rebooting to recovery. Reconnect after device restarts."
+            )
+        )
+        worker.failed.connect(self._on_frp_action_error)
+        worker.start()
+
+    def reboot_to_bootloader(self):
+        if not self.current_serial:
+            return
+
+        self.frp_operation_message_label.setText("Executing reboot to bootloader...")
+        self.frp_recovery_button.setEnabled(False)
+        self.frp_bootloader_button.setEnabled(False)
+        self.frp_verify_button.setEnabled(False)
+
+        worker = AsyncWorker(
+            lambda: execute_bootloader_reboot(self.current_serial),
+            self,
+        )
+        worker.succeeded.connect(
+            lambda result: self._on_frp_action_complete(
+                result,
+                "Rebooting to bootloader. Reconnect after device restarts."
+            )
+        )
+        worker.failed.connect(self._on_frp_action_error)
+        worker.start()
+
+    def verify_frp_result_action(self):
+        if not self.current_serial:
+            return
+
+        self.frp_operation_message_label.setText("Verifying FRP result...")
+        self.frp_verify_button.setEnabled(False)
+        self.frp_recovery_button.setEnabled(False)
+        self.frp_bootloader_button.setEnabled(False)
+
+        worker = AsyncWorker(
+            lambda: verify_frp_result(self.current_serial),
+            self,
+        )
+        worker.succeeded.connect(self._on_frp_verify_ready)
+        worker.failed.connect(self._on_frp_action_error)
+        worker.start()
+
+    def _on_frp_verify_ready(self, result):
+        self.frp_operation_message_label.setText(
+            f"Result verified: {result.frp_status}. Owner verification required: {result.owner_verification_required}"
+        )
+        self.frp_verify_button.setEnabled(True)
+        self.frp_recovery_button.setEnabled(
+            not result.owner_verification_required
+        )
+        self.frp_bootloader_button.setEnabled(
+            not result.owner_verification_required
+        )
+
+    def _on_frp_action_complete(self, command_output: str, message: str):
+        self.frp_operation_message_label.setText(
+            f"Operation complete. {message}"
+        )
+        self.frp_verify_button.setEnabled(True)
+        self.frp_recovery_button.setEnabled(True)
+        self.frp_bootloader_button.setEnabled(True)
+
+    def _on_frp_action_error(self, message: str):
+        self.frp_operation_message_label.setText(
+            f"Action failed: {message}"
+        )
+        self.frp_verify_button.setEnabled(True)
+        self.frp_recovery_button.setEnabled(True)
+        self.frp_bootloader_button.setEnabled(True)
+
+    def _set_locked_recovery_buttons_enabled(self, enabled: bool):
+        self.locked_recovery_button.setEnabled(enabled)
+        self.locked_bootloader_button.setEnabled(enabled)
+        self.locked_verify_button.setEnabled(enabled)
+
+    def _apply_locked_state_action_enablement(self):
+        if not self._current_locked_state:
+            return
+
+        self.locked_recovery_button.setEnabled(
+            "reboot_recovery" in self._current_locked_state.supported_actions
+        )
+        self.locked_bootloader_button.setEnabled(
+            "reboot_bootloader" in self._current_locked_state.supported_actions
+        )
+        self.locked_verify_button.setEnabled(
+            "verify_result" in self._current_locked_state.supported_actions
+        )
+
+    def refresh_locked_device_state(self):
+        if not self.current_serial:
+            self._current_locked_state = None
+            self.locked_state_label.setText("Locked Recovery State: Tidak ada device")
+            self.locked_identity_label.setText("Device Identity: -")
+            self.locked_mode_label.setText("Mode: -")
+            self.locked_options_label.setText("Recovery Options: -")
+            self.locked_supported_label.setText("Supported Actions: -")
+            self.locked_confirm_label.setText("Confirmation: -")
+            self.locked_action_message_label.setText("")
+            self.locked_confirm_button.setEnabled(False)
+            self._set_locked_recovery_buttons_enabled(False)
+            return
+
+        self.locked_state_label.setText("Locked Recovery State: Memeriksa...")
+        self.locked_identity_label.setText("Device Identity: -")
+        self.locked_mode_label.setText("Mode: -")
+        self.locked_options_label.setText("Recovery Options: -")
+        self.locked_supported_label.setText("Supported Actions: -")
+        self.locked_confirm_label.setText("Confirmation: -")
+        self.locked_action_message_label.setText("Mendeteksi kondisi locked device recovery...")
+        self.locked_confirm_button.setEnabled(False)
+        self._set_locked_recovery_buttons_enabled(False)
+
+        if getattr(self, "_locked_state_worker", None) and self._locked_state_worker.isRunning():
+            return
+
+        serial = self.current_serial
+        self._locked_state_worker = AsyncWorker(
+            lambda: detect_locked_device_recovery_state(serial),
+            self,
+        )
+        self._locked_state_worker.succeeded.connect(
+            self._on_locked_device_state_ready
+        )
+        self._locked_state_worker.failed.connect(
+            self._on_locked_device_state_error
+        )
+        self._locked_state_worker.start()
+
+    def _on_locked_device_state_ready(self, state: LockedDeviceRecoveryState):
+        self._current_locked_state = state
+        self.locked_state_label.setText(
+            f"Locked Recovery State: {state.adb_state}"
+        )
+        identity_items = [
+            f"{key}={value}" for key, value in state.device_identity.items()
+            if value and value != "Unknown"
+        ]
+        self.locked_identity_label.setText(
+            "Device Identity: " + ", ".join(identity_items)
+            if identity_items else "Device Identity: Unknown"
+        )
+        self.locked_mode_label.setText(f"Mode: {state.device_mode}")
+        self.locked_options_label.setText(
+            "Recovery Options: " + " \n".join(state.recovery_options)
+            if state.recovery_options else "Recovery Options: none"
+        )
+        supported_text = (
+            ", ".join(state.supported_actions)
+            if state.supported_actions else "none"
+        )
+        self.locked_supported_label.setText(
+            f"Supported Actions: {supported_text}"
+        )
+        self.locked_confirm_label.setText(
+            "Confirmation: required"
+            if state.confirmation_required else "Confirmation: not required"
+        )
+        self.locked_action_message_label.setText(state.message)
+
+        self.locked_confirm_button.setEnabled(state.confirmation_required)
+        if not state.confirmation_required:
+            self._apply_locked_state_action_enablement()
+
+    def _on_locked_device_state_error(self, message: str):
+        self._current_locked_state = None
+        self.locked_state_label.setText("Locked Recovery State: ERROR")
+        self.locked_identity_label.setText("Device Identity: -")
+        self.locked_mode_label.setText("Mode: -")
+        self.locked_options_label.setText("Recovery Options: -")
+        self.locked_supported_label.setText("Supported Actions: -")
+        self.locked_confirm_label.setText("Confirmation: -")
+        self.locked_action_message_label.setText(
+            f"Gagal mendeteksi locked device recovery: {message}"
+        )
+        self.locked_confirm_button.setEnabled(False)
+        self._set_locked_recovery_buttons_enabled(False)
+
+    def confirm_recovery_action(self):
+        if not self._current_locked_state:
+            return
+
+        if not self._current_locked_state.supported_actions:
+            self.locked_action_message_label.setText(
+                "Tidak ada recovery action yang didukung untuk kondisi ini."
+            )
+            return
+
+        if not self._current_locked_state.confirmation_required:
+            self.locked_action_message_label.setText(
+                "Tidak diperlukan konfirmasi. Menjalankan aksi yang tersedia."
+            )
+            self._apply_locked_state_action_enablement()
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Konfirmasi Recovery",
+            "Tindakan ini berisiko dan hanya boleh dilakukan jika otorisasi owner/OEM sudah tersedia. Lanjutkan?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+
+        if answer != QMessageBox.Yes:
+            self.locked_action_message_label.setText("Konfirmasi dibatalkan.")
+            return
+
+        self.locked_confirm_label.setText("Confirmation: technician confirmed")
+        self.locked_action_message_label.setText(
+            "Teknisi telah mengonfirmasi. Jalankan salah satu supported action dengan hati-hati."
+        )
+        self._apply_locked_state_action_enablement()
+        self.locked_confirm_button.setEnabled(False)
+
+    def reboot_locked_recovery(self):
+        if not self.current_serial:
+            return
+
+        self.locked_action_message_label.setText(
+            "Executing locked device reboot to recovery..."
+        )
+        self._set_locked_recovery_buttons_enabled(False)
+
+        worker = AsyncWorker(
+            lambda: execute_recovery_reboot(self.current_serial),
+            self,
+        )
+        worker.succeeded.connect(
+            lambda result: self._on_locked_action_complete(
+                result,
+                "Rebooting to recovery. Reconnect after device restarts."
+            )
+        )
+        worker.failed.connect(self._on_locked_action_error)
+        worker.start()
+
+    def reboot_locked_bootloader(self):
+        if not self.current_serial:
+            return
+
+        self.locked_action_message_label.setText(
+            "Executing locked device reboot to bootloader..."
+        )
+        self._set_locked_recovery_buttons_enabled(False)
+
+        worker = AsyncWorker(
+            lambda: execute_bootloader_reboot(self.current_serial),
+            self,
+        )
+        worker.succeeded.connect(
+            lambda result: self._on_locked_action_complete(
+                result,
+                "Rebooting to bootloader. Reconnect after device restarts."
+            )
+        )
+        worker.failed.connect(self._on_locked_action_error)
+        worker.start()
+
+    def verify_locked_result(self):
+        if not self.current_serial:
+            return
+
+        self.locked_action_message_label.setText("Verifying locked device result...")
+        self._set_locked_recovery_buttons_enabled(False)
+
+        worker = AsyncWorker(
+            lambda: verify_frp_result(self.current_serial),
+            self,
+        )
+        worker.succeeded.connect(self._on_locked_verify_ready)
+        worker.failed.connect(self._on_locked_action_error)
+        worker.start()
+
+    def _on_locked_verify_ready(self, result):
+        self.locked_action_message_label.setText(
+            f"Verify result: {result.frp_status}. Owner verification required: {result.owner_verification_required}"
+        )
+        self._apply_locked_state_action_enablement()
+
+    def _on_locked_action_complete(self, command_output: str, message: str):
+        self.locked_action_message_label.setText(f"Operation complete. {message}")
+        self._apply_locked_state_action_enablement()
+
+    def _on_locked_action_error(self, message: str):
+        self.locked_action_message_label.setText(f"Action failed: {message}")
+        self._apply_locked_state_action_enablement()
 
     def refresh_recovery_assessment(self):
         if not self.current_serial:
