@@ -190,10 +190,207 @@ def check_network(serial: str) -> HardwareTestResult:
     return _result("network", "Network", "WARN", "No IPv4", "No non-loopback IPv4 address detected at test time.")
 
 
+def check_battery_health(serial: str) -> HardwareTestResult:
+    """Baca kode 'health' dari dumpsys battery - sinyal kerusakan baterai
+    fisik (overheat/overvoltage/dead) yang terpisah dari level/suhu sesaat.
+    """
+    try:
+        raw = _shell(serial, "dumpsys", "battery")
+    except ADBError as exc:
+        return _result("battery_health", "Battery Health", "FAIL", "Unavailable", str(exc))
+
+    # Kode health standar Android: 1=UNKNOWN 2=GOOD 3=OVERHEAT 4=DEAD
+    # 5=OVER_VOLTAGE 6=UNSPECIFIED_FAILURE 7=COLD
+    health_codes = {
+        "1": ("Unknown", "WARN"),
+        "2": ("Good", "PASS"),
+        "3": ("Overheat", "FAIL"),
+        "4": ("Dead", "FAIL"),
+        "5": ("Over Voltage", "FAIL"),
+        "6": ("Unspecified Failure", "FAIL"),
+        "7": ("Cold", "WARN"),
+    }
+    match = re.search(r"health:\s*(\d+)", raw)
+    code = match.group(1) if match else None
+    label, state = health_codes.get(code, ("Unknown", "WARN"))
+
+    detail = (
+        "Baterai perlu diganti - indikasi kerusakan fisik dari sistem Android."
+        if state == "FAIL"
+        else "Health code dari Android battery service."
+    )
+    return _result("battery_health", "Battery Health", state, label, detail)
+
+
+def check_thermal(serial: str) -> HardwareTestResult:
+    """Deteksi throttling/overheat via thermalservice - indikasi masalah
+    pendinginan (thermal paste kering, kipas/vapor chamber rusak, dll)."""
+    try:
+        raw = _shell(serial, "dumpsys", "thermalservice")
+    except ADBError as exc:
+        return _result("thermal", "Thermal", "FAIL", "Unavailable", str(exc))
+
+    if not raw:
+        return _result("thermal", "Thermal", "INFO", "No data", "Thermal service tidak mengembalikan data.")
+
+    # Severity level di Android: NONE, LIGHT, MODERATE, SEVERE, CRITICAL, EMERGENCY, SHUTDOWN
+    severe_hit = re.search(r"mStatus\s*=\s*(\d+)", raw) or re.search(r"Status:\s*(\w+)", raw)
+    lowered = raw.lower()
+
+    if "shutdown" in lowered or "emergency" in lowered:
+        return _result("thermal", "Thermal", "FAIL", "Critical", "Device pernah/sedang thermal shutdown - cek pendinginan internal.")
+    if "severe" in lowered or "critical" in lowered:
+        return _result("thermal", "Thermal", "WARN", "Throttling", "Device mengalami thermal throttling tingkat tinggi.")
+    return _result("thermal", "Thermal", "PASS", "Normal", "Tidak ada indikasi thermal throttling parah.")
+
+
+def check_memory(serial: str) -> HardwareTestResult:
+    """Ringkasan RAM - tekanan memori tinggi bisa jadi gejala RAM
+    bermasalah atau sistem kelebihan beban aplikasi background."""
+    try:
+        raw = _shell(serial, "dumpsys", "meminfo", "--summary")
+    except ADBError as exc:
+        return _result("memory", "RAM", "FAIL", "Unavailable", str(exc))
+
+    total = re.search(r"Total RAM:\s*([\d,]+)K", raw)
+    free = re.search(r"Free RAM:\s*([\d,]+)K", raw)
+    low_ram = "low ram" in raw.lower() or "lowmemorykiller" in raw.lower()
+
+    if not total:
+        return _result("memory", "RAM", "INFO", "Detected", "Tidak bisa parse ringkasan meminfo.")
+
+    total_mb = int(total.group(1).replace(",", "")) // 1024
+    free_mb = int(free.group(1).replace(",", "")) // 1024 if free else 0
+    percent_free = (free_mb / total_mb * 100) if total_mb else 0
+
+    value = f"{total_mb} MB total, {free_mb} MB free"
+    if percent_free < 5:
+        return _result("memory", "RAM", "WARN", value, "RAM tersisa sangat sedikit - device mungkin sering lag/force-close aplikasi.")
+    return _result("memory", "RAM", "PASS", value, "Penggunaan RAM dalam batas wajar.")
+
+
+def check_wifi_radio(serial: str) -> HardwareTestResult:
+    """Cek status radio WiFi secara spesifik - terpisah dari check_network
+    yang cuma cek IP address aktif (device bisa saja radio WiFi mati tapi
+    masih ada IP dari mobile data)."""
+    try:
+        raw = _shell(serial, "dumpsys", "wifi")
+    except ADBError as exc:
+        return _result("wifi_radio", "WiFi Radio", "FAIL", "Unavailable", str(exc))
+
+    if not raw:
+        return _result("wifi_radio", "WiFi Radio", "WARN", "No data", "WiFi service tidak merespons - kemungkinan modul WiFi bermasalah.")
+
+    lowered = raw.lower()
+    if "wi-fi is enabled" in lowered or "wifi is enabled" in lowered or "state: enabled" in lowered:
+        return _result("wifi_radio", "WiFi Radio", "PASS", "Enabled", "WiFi radio aktif dan merespons normal.")
+    if "wi-fi is disabled" in lowered or "wifi is disabled" in lowered:
+        return _result("wifi_radio", "WiFi Radio", "INFO", "Disabled", "WiFi radio terdeteksi tapi sedang dimatikan user.")
+    return _result("wifi_radio", "WiFi Radio", "INFO", "Detected", "WiFi service tersedia; status detail tidak terparsing.")
+
+
+def check_bluetooth(serial: str) -> HardwareTestResult:
+    try:
+        features = _shell(serial, "pm", "list", "features")
+    except ADBError as exc:
+        return _result("bluetooth", "Bluetooth", "FAIL", "Unavailable", str(exc))
+
+    if "bluetooth" not in features.lower():
+        return _result("bluetooth", "Bluetooth", "WARN", "Not detected", "Modul Bluetooth tidak terdeteksi dari system features.")
+    return _result("bluetooth", "Bluetooth", "INFO", "Detected", "Hardware Bluetooth terdeteksi; pairing test tetap perlu manual.")
+
+
+def check_gps(serial: str) -> HardwareTestResult:
+    try:
+        features = _shell(serial, "pm", "list", "features")
+    except ADBError as exc:
+        return _result("gps", "GPS", "FAIL", "Unavailable", str(exc))
+
+    if "location.gps" not in features.lower():
+        return _result("gps", "GPS", "WARN", "Not detected", "Modul GPS tidak terdeteksi dari system features.")
+    return _result("gps", "GPS", "INFO", "Detected", "Hardware GPS terdeteksi; fix satelit tetap perlu test outdoor.")
+
+
+def check_nfc(serial: str) -> HardwareTestResult:
+    try:
+        features = _shell(serial, "pm", "list", "features")
+    except ADBError as exc:
+        return _result("nfc", "NFC", "FAIL", "Unavailable", str(exc))
+
+    if "nfc" not in features.lower():
+        return _result("nfc", "NFC", "INFO", "Not present", "Device ini tidak punya hardware NFC (bukan berarti rusak).")
+    return _result("nfc", "NFC", "INFO", "Detected", "Hardware NFC terdeteksi; tap test tetap perlu manual.")
+
+
+def check_vibrator(serial: str) -> HardwareTestResult:
+    try:
+        features = _shell(serial, "pm", "list", "features")
+    except ADBError as exc:
+        return _result("vibrator", "Vibration Motor", "FAIL", "Unavailable", str(exc))
+
+    if "vibrator" not in features.lower():
+        return _result("vibrator", "Vibration Motor", "WARN", "Not detected", "Modul vibrator tidak terdeteksi dari system features.")
+    return _result("vibrator", "Vibration Motor", "INFO", "Detected", "Hardware vibrator terdeteksi; getaran fisik tetap perlu test manual.")
+
+
+def check_fingerprint(serial: str) -> HardwareTestResult:
+    try:
+        features = _shell(serial, "pm", "list", "features")
+    except ADBError as exc:
+        return _result("fingerprint", "Fingerprint Sensor", "FAIL", "Unavailable", str(exc))
+
+    if "fingerprint" not in features.lower():
+        return _result("fingerprint", "Fingerprint Sensor", "INFO", "Not present", "Device ini tidak punya sensor fingerprint (bukan berarti rusak).")
+    return _result("fingerprint", "Fingerprint Sensor", "INFO", "Detected", "Sensor fingerprint terdeteksi; akurasi scan tetap perlu test manual.")
+
+
+def check_modem_radio(serial: str) -> HardwareTestResult:
+    """Cek status radio seluler/modem - berguna buat device yang sering
+    'no service' atau nggak kebaca sinyal padahal kartu SIM normal."""
+    try:
+        raw = _shell(serial, "dumpsys", "telephony.registry")
+    except ADBError as exc:
+        return _result("modem", "Modem/Radio", "FAIL", "Unavailable", str(exc))
+
+    if not raw:
+        return _result("modem", "Modem/Radio", "WARN", "No data", "Telephony service tidak merespons - device mungkin tidak punya modem seluler (tablet WiFi-only) atau modem bermasalah.")
+
+    lowered = raw.lower()
+    if "mservicestate=0" in lowered or "in service" in lowered:
+        return _result("modem", "Modem/Radio", "PASS", "In Service", "Modem terdaftar ke jaringan seluler.")
+    if "out of service" in lowered or "mservicestate=1" in lowered:
+        return _result("modem", "Modem/Radio", "WARN", "Out of Service", "Modem tidak terdaftar ke jaringan - cek sinyal area atau kemungkinan modem bermasalah.")
+    return _result("modem", "Modem/Radio", "INFO", "Detected", "Telephony service tersedia; status detail tidak terparsing.")
+
+
+def check_crash_stability(serial: str) -> HardwareTestResult:
+    """Hitung crash/ANR aplikasi dari logcat terkini - indikator masalah
+    software (bukan hardware) yang sering bikin device 'terasa rusak'
+    padahal sebenarnya software/RAM/storage yang bermasalah."""
+    try:
+        raw = run_adb("-s", serial, "shell", "logcat", "-d", "-t", "3000", "*:E", timeout=15)
+    except ADBError as exc:
+        return _result("crash_stability", "Software Stability", "FAIL", "Unavailable", str(exc))
+
+    crash_count = len(re.findall(r"FATAL EXCEPTION|AndroidRuntime.*FATAL", raw))
+    anr_count = len(re.findall(r"ANR in |Input dispatching timed out", raw))
+
+    total = crash_count + anr_count
+    value = f"{crash_count} crash, {anr_count} ANR"
+    detail = "Dihitung dari 3000 baris log error terakhir (indikatif, bukan angka absolut)."
+
+    if total >= 5:
+        return _result("crash_stability", "Software Stability", "WARN", value, f"{detail} Frekuensi tinggi - kemungkinan masalah software/RAM/storage, bukan hardware.")
+    if total > 0:
+        return _result("crash_stability", "Software Stability", "INFO", value, detail)
+    return _result("crash_stability", "Software Stability", "PASS", "Stable", "Tidak ada crash/ANR terdeteksi di log terkini.")
+
+
 def run_hardware_test(serial: str) -> HardwareTestReport:
     """Run safe, read-only checks against one authorized ADB device."""
     checks = [
         check_battery,
+        check_battery_health,
         check_storage,
         check_display,
         check_audio,
@@ -201,6 +398,16 @@ def run_hardware_test(serial: str) -> HardwareTestReport:
         check_sensors,
         check_usb,
         check_network,
+        check_wifi_radio,
+        check_bluetooth,
+        check_gps,
+        check_nfc,
+        check_vibrator,
+        check_fingerprint,
+        check_modem_radio,
+        check_thermal,
+        check_memory,
+        check_crash_stability,
     ]
 
     results: list[HardwareTestResult] = []
