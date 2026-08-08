@@ -1,4 +1,4 @@
-"""Safe recovery planning for devices that cannot be unlocked.
+﻿"""Safe recovery planning for devices that cannot be unlocked.
 
 This module does not bypass PIN/password/pattern/FRP protections.
 It identifies connected devices, determines device mode, and recommends
@@ -301,6 +301,16 @@ def _infer_brand_group(identity: dict[str, str]) -> str:
         return "Nokia / HMD"
     if "oneplus" in raw:
         return "OnePlus"
+
+    fallback = (
+        identity.get("manufacturer")
+        or identity.get("brand")
+        or identity.get("model")
+        or identity.get("product")
+        or identity.get("device")
+    )
+    if fallback:
+        return fallback.strip().title()
     return "Unknown"
 
 
@@ -444,3 +454,4 @@ def detect_locked_device_recovery_state(
         recommended_tools=recommended_tools,
         message=message,
     )
+

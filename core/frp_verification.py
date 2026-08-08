@@ -1,16 +1,17 @@
-"""Deteksi status FRP (Factory Reset Protection) - READ ONLY.
+﻿"""Deteksi status FRP (Factory Reset Protection) - READ ONLY.
 
 Modul ini HANYA membaca status setup/provisioning device via ADB shell
-(getprop, settings get) untuk menentukan apakah verifikasi kepemilikan
-diperlukan sebelum teknisi melakukan reset/recovery. Modul ini secara
-sengaja TIDAK PERNAH mencoba melewati (bypass) FRP, PIN, password, atau
-pattern - konsisten dengan core/locked_device_recovery.py yang
-mengonsumsi hasil dari sini.
+(getprop) untuk menentukan apakah verifikasi kepemilikan diperlukan
+sebelum teknisi melakukan reset/recovery. Modul ini secara sengaja TIDAK
+PERNAH mencoba melewati (bypass) FRP, PIN, password, atau pattern -
+konsisten dengan core/locked_device_recovery.py yang mengonsumsi hasil
+dari sini.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 from .adb import ADBError, run_adb
 
@@ -36,6 +37,28 @@ class FRPVerification:
     message: str
 
 
+def _default_runner(serial: str, command: str) -> str:
+    return run_adb("-s", serial, "shell", command)
+
+
+def _parse_getprop(output: str) -> dict[str, str]:
+    """Parse output mentah getprop (format [key]: [value] per baris)
+    menjadi dict {key: value}."""
+    props: dict[str, str] = {}
+    for line in output.splitlines():
+        line = line.strip()
+        if not line.startswith("["):
+            continue
+        try:
+            key_part, value_part = line.split("]:", 1)
+        except ValueError:
+            continue
+        key = key_part.strip().lstrip("[").strip()
+        value = value_part.strip().strip("[]").strip()
+        props[key] = value
+    return props
+
+
 def _getprop(serial: str, prop: str) -> str:
     return run_adb("-s", serial, "shell", "getprop", prop).strip()
 
@@ -44,40 +67,60 @@ def _settings_get(serial: str, namespace: str, key: str) -> str:
     return run_adb("-s", serial, "shell", "settings", "get", namespace, key).strip()
 
 
-def collect_frp_verification(serial: str) -> FRPVerification:
+def collect_frp_verification(
+    serial: str,
+    runner: Callable[[str, str], str] = _default_runner,
+) -> FRPVerification:
     """Baca status setup/provisioning device untuk menentukan apakah
     verifikasi kepemilikan (invoice/KTP) diperlukan sebelum tindakan
     reset. Tidak pernah mengembalikan/menjalankan langkah bypass.
     """
     try:
-        manufacturer = _getprop(serial, "ro.product.manufacturer") or "Unknown"
-        model = _getprop(serial, "ro.product.model") or "Unknown"
-        android_version = _getprop(serial, "ro.build.version.release") or "Unknown"
-        build_id = _getprop(serial, "ro.build.id") or "Unknown"
-
-        setup_complete_raw = _settings_get(serial, "secure", "user_setup_complete")
-        device_provisioned_raw = _settings_get(serial, "global", "device_provisioned")
-        setup_complete = setup_complete_raw == "1"
-        device_provisioned = device_provisioned_raw == "1"
-
-        frp_provisioned = _getprop(serial, "ro.frp.pst") or "Unknown"
-        bootloader_locked = _getprop(serial, "ro.boot.flash.locked") or "Unknown"
-        verified_boot_state = _getprop(serial, "ro.boot.verifiedbootstate") or "Unknown"
+        output = runner(serial, "getprop")
     except ADBError as exc:
         raise FRPVerificationError(str(exc)) from exc
 
-    owner_verification_required = setup_complete and device_provisioned
+    props = _parse_getprop(output)
 
-    if owner_verification_required:
-        frp_status = "SETUP COMPLETE"
+    manufacturer = props.get("ro.product.manufacturer") or "Unknown"
+    model = props.get("ro.product.model") or "Unknown"
+    android_version = props.get("ro.build.version.release") or "Unknown"
+    build_id = props.get("ro.build.id") or "Unknown"
+    frp_provisioned = props.get("ro.frp.pst") or "Unknown"
+    bootloader_locked = props.get("ro.boot.flash.locked") or "Unknown"
+    verified_boot_state = props.get("ro.boot.verifiedbootstate") or "Unknown"
+
+    setup_raw = props.get("ro.setupwizard.user_setup_complete")
+    provisioned_raw = props.get("sys.device_provisioned")
+
+    if setup_raw is None and provisioned_raw is None:
+        setup_complete = False
+        device_provisioned = False
+        frp_status = "UNKNOWN"
+        owner_verification_required = True
         message = (
-            "Device sudah melewati setup wizard dan terikat ke akun pemilik. "
+            "Status setup wizard/provisioning tidak terbaca. Wajib verifikasi "
+            "kepemilikan (invoice pembelian/KTP yang sesuai) sebelum tindakan lanjut."
+        )
+    elif setup_raw == "1" and provisioned_raw == "1":
+        setup_complete = True
+        device_provisioned = True
+        frp_status = "SETUP COMPLETE"
+        owner_verification_required = False
+        message = (
+            "Device sudah menyelesaikan setup wizard. Aman untuk melanjutkan "
+            "diagnostik/service standar."
+        )
+    else:
+        setup_complete = setup_raw == "1"
+        device_provisioned = provisioned_raw == "1"
+        frp_status = "OWNER VERIFICATION REQUIRED"
+        owner_verification_required = True
+        message = (
+            "Device belum menyelesaikan setup wizard / belum di-provision penuh. "
             "Wajib verifikasi kepemilikan (invoice pembelian/KTP yang sesuai) "
             "sebelum melakukan factory reset atau tindakan recovery lain."
         )
-    else:
-        frp_status = "SETUP INCOMPLETE"
-        message = "Device belum menyelesaikan setup wizard / belum di-provision."
 
     return FRPVerification(
         serial=serial,
