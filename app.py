@@ -160,6 +160,45 @@ QLabel {
     font-weight: 600;
 }
 
+#navScroll, #contentScroll {
+    background: transparent;
+    border: none;
+}
+
+#navScroll QScrollBar:vertical,
+#contentScroll QScrollBar:vertical {
+    background: transparent;
+    width: 10px;
+    margin: 0;
+}
+
+#navScroll QScrollBar::handle:vertical,
+#contentScroll QScrollBar::handle:vertical {
+    background: #3a3f4b;
+    border-radius: 5px;
+    min-height: 24px;
+}
+
+#navScroll QScrollBar::handle:vertical:hover,
+#contentScroll QScrollBar::handle:vertical:hover {
+    background: #ff5a1f;
+}
+
+#navScroll QScrollBar::add-line:vertical,
+#navScroll QScrollBar::sub-line:vertical,
+#contentScroll QScrollBar::add-line:vertical,
+#contentScroll QScrollBar::sub-line:vertical {
+    height: 0;
+    background: transparent;
+}
+
+#navScroll QScrollBar::add-page:vertical,
+#navScroll QScrollBar::sub-page:vertical,
+#contentScroll QScrollBar::add-page:vertical,
+#contentScroll QScrollBar::sub-page:vertical {
+    background: transparent;
+}
+
 #deviceSelector {
     background: #1a1d24;
     color: white;
@@ -385,6 +424,7 @@ class MainWindow(QMainWindow):
         nav_scroll.setFrameShape(QFrame.NoFrame)
         nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        nav_scroll.verticalScrollBar().setSingleStep(18)
 
         nav_container = QWidget()
         nav_layout = QVBoxLayout(nav_container)
@@ -497,7 +537,22 @@ class MainWindow(QMainWindow):
         }
 
         root_layout.addWidget(sidebar)
-        root_layout.addWidget(self.pages)
+
+        # Area konten (di samping sidebar) dibungkus QScrollArea supaya
+        # halaman dengan banyak section (mis. Firmware & Flash, Recovery
+        # Assistant, Automation) tetap bisa di-scroll penuh kalau tingginya
+        # melebihi window - pola sama seperti fix sidebar sebelumnya.
+        content_scroll = QScrollArea()
+        content_scroll.setObjectName("contentScroll")
+        content_scroll.setWidgetResizable(True)
+        content_scroll.setFrameShape(QFrame.NoFrame)
+        content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        content_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        content_scroll.verticalScrollBar().setSingleStep(18)
+        content_scroll.setWidget(self.pages)
+        root_layout.addWidget(content_scroll, 1)
+
+        self.content_scroll = content_scroll
 
         self.setCentralWidget(root)
 
