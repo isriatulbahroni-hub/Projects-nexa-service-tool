@@ -6,6 +6,7 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -48,6 +49,7 @@ from core.packages import (
     uninstall_package,
     force_stop,
     clear_app_data,
+    trim_caches,
 )
 from core.file_explorer import (
     list_dir,
@@ -558,6 +560,20 @@ class MainWindow(QMainWindow):
 
         self.switch_page("dashboard")
 
+    def refresh_all_data(self):
+        """Reload device list + semua data yang sudah pernah di-fetch
+        (diagnostics/security/network) sekaligus - semua sudah threaded
+        di masing-masing fungsi, jadi aman dipanggil bersamaan tanpa
+        nge-freeze UI."""
+        self.refresh_device_list()
+
+        if not self.current_device:
+            return
+
+        self.refresh_diagnostics()
+        self.refresh_security_check()
+        self.refresh_network_info()
+
     def switch_page(self, key: str):
         for k, btn in self.nav_buttons.items():
             btn.setChecked(k == key)
@@ -607,8 +623,21 @@ class MainWindow(QMainWindow):
         desc = QLabel("Overview perangkat dan koneksi service tool.")
         desc.setObjectName("muted")
 
-        layout.addWidget(title)
-        layout.addWidget(desc)
+        header_row = QHBoxLayout()
+        header_col = QVBoxLayout()
+        header_col.addWidget(title)
+        header_col.addWidget(desc)
+        header_row.addLayout(header_col, 1)
+
+        self.dashboard_refresh_all_button = QPushButton("🔄 Refresh Semua")
+        self.dashboard_refresh_all_button.setObjectName("action")
+        self.dashboard_refresh_all_button.setToolTip(
+            "Reload device list, diagnostics, security check, dan network info sekaligus."
+        )
+        self.dashboard_refresh_all_button.clicked.connect(self.refresh_all_data)
+        header_row.addWidget(self.dashboard_refresh_all_button)
+
+        layout.addLayout(header_row)
 
         row = QHBoxLayout()
         row.setSpacing(16)
@@ -1443,6 +1472,14 @@ class MainWindow(QMainWindow):
         self.apps_stop_button.setObjectName("action")
         self.apps_stop_button.clicked.connect(self.force_stop_selected_app)
 
+        self.apps_repair_button = QPushButton("🔧 Repair (Trim Cache)")
+        self.apps_repair_button.setObjectName("action")
+        self.apps_repair_button.setToolTip(
+            "Bersihkan cache SEMUA aplikasi (setara 'Free up space' di "
+            "Settings Android). Tidak menghapus data/login/foto - aman."
+        )
+        self.apps_repair_button.clicked.connect(self.repair_trim_caches)
+
         self.apps_clear_button = QPushButton("Clear Data")
         self.apps_clear_button.setObjectName("action")
         self.apps_clear_button.clicked.connect(self.clear_data_selected_app)
@@ -1452,6 +1489,7 @@ class MainWindow(QMainWindow):
         self.apps_uninstall_button.clicked.connect(self.uninstall_selected_app)
 
         action_row.addWidget(self.apps_stop_button)
+        action_row.addWidget(self.apps_repair_button)
         action_row.addWidget(self.apps_clear_button)
         action_row.addWidget(self.apps_uninstall_button)
 
@@ -1518,6 +1556,48 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Berhasil", f"{package} dihentikan paksa.")
         except ADBError as exc:
             QMessageBox.critical(self, "Gagal", str(exc))
+
+    def repair_trim_caches(self):
+        if not self.current_device:
+            QMessageBox.warning(self, "Tidak ada device", "Hubungkan device dulu.")
+            return
+
+        if getattr(self, "_repair_worker", None) and self._repair_worker.isRunning():
+            return
+
+        reply = QMessageBox.question(
+            self, "Repair - Trim Cache",
+            "Bersihkan cache SEMUA aplikasi di device ini?\n\n"
+            "Ini AMAN - setara fitur 'Free up space' di Settings Android. "
+            "Tidak menghapus data, login, foto, atau file apapun - hanya "
+            "file cache sementara yang bisa dibuat ulang otomatis oleh app.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self.apps_repair_button.setEnabled(False)
+        self.apps_repair_button.setText("⏳ Membersihkan cache...")
+        serial = self.current_device.serial
+
+        self._repair_worker = AsyncWorker(lambda: trim_caches(serial), self)
+        self._repair_worker.succeeded.connect(self._on_repair_finished)
+        self._repair_worker.failed.connect(self._on_repair_failed)
+        self._repair_worker.start()
+
+    def _on_repair_finished(self, _output):
+        self.apps_repair_button.setEnabled(True)
+        self.apps_repair_button.setText("🔧 Repair (Trim Cache)")
+        QMessageBox.information(
+            self, "Repair Selesai",
+            "Cache semua aplikasi berhasil dibersihkan. Device mungkin "
+            "terasa lebih responsif dan ada tambahan storage kosong."
+        )
+
+    def _on_repair_failed(self, message: str):
+        self.apps_repair_button.setEnabled(True)
+        self.apps_repair_button.setText("🔧 Repair (Trim Cache)")
+        QMessageBox.critical(self, "Repair Gagal", message)
 
     def clear_data_selected_app(self):
         package = self._get_selected_package()
@@ -2477,8 +2557,12 @@ class MainWindow(QMainWindow):
         self.case_update_status_button.clicked.connect(self.update_selected_case_status)
         self.case_add_note_button = QPushButton("Tambah Catatan")
         self.case_add_note_button.clicked.connect(self.add_note_to_selected_case)
+        self.case_response_button = QPushButton("💬 Respons ke Customer")
+        self.case_response_button.setObjectName("action")
+        self.case_response_button.clicked.connect(self.generate_customer_response)
         action_row.addWidget(self.case_update_status_button)
         action_row.addWidget(self.case_add_note_button)
+        action_row.addWidget(self.case_response_button)
         action_row.addStretch()
         layout.addLayout(action_row)
 
@@ -2528,6 +2612,92 @@ class MainWindow(QMainWindow):
             widget.clear()
 
         self.refresh_cases_table()
+
+    def generate_customer_response(self):
+        case_id = self._selected_case_id()
+        if case_id is None:
+            QMessageBox.information(self, "Pilih Case", "Pilih case dari tabel dulu.")
+            return
+
+        try:
+            case = get_case(case_id)
+        except Exception as exc:
+            QMessageBox.critical(self, "Gagal", str(exc))
+            return
+
+        device_label = f"{case.manufacturer} {case.model}".strip() or "device Anda"
+        name = case.customer_name or "Bapak/Ibu"
+
+        templates = {
+            "Received": (
+                f"Halo {name}, {device_label} Anda (No. Servis: {case.case_number}) "
+                f"sudah kami terima dan masuk antrian pengecekan. Kami akan kabari "
+                f"lagi setelah diagnosa awal selesai. Terima kasih."
+            ),
+            "Diagnosing": (
+                f"Halo {name}, {device_label} Anda (No. Servis: {case.case_number}) "
+                f"sedang dalam proses diagnosa oleh teknisi kami. Estimasi hasil "
+                f"diagnosa akan kami informasikan segera."
+            ),
+            "Repairing": (
+                f"Halo {name}, {device_label} Anda (No. Servis: {case.case_number}) "
+                f"sedang dalam proses perbaikan. "
+                + (f"Estimasi biaya: Rp{case.estimated_cost:,.0f}. ".replace(",", ".") if case.estimated_cost else "")
+                + "Kami akan kabari begitu selesai."
+            ),
+            "Testing": (
+                f"Halo {name}, perbaikan {device_label} Anda (No. Servis: {case.case_number}) "
+                f"sudah selesai dan sedang tahap pengujian akhir sebelum diserahkan kembali."
+            ),
+            "Completed": (
+                f"Halo {name}, {device_label} Anda (No. Servis: {case.case_number}) "
+                f"sudah SELESAI diperbaiki dan siap diambil. "
+                + (f"Total biaya: Rp{case.estimated_cost:,.0f}. ".replace(",", ".") if case.estimated_cost else "")
+                + "Ditunggu kedatangannya, terima kasih!"
+            ),
+            "Cancelled": (
+                f"Halo {name}, servis {device_label} Anda (No. Servis: {case.case_number}) "
+                f"telah dibatalkan. Silakan hubungi kami jika ada pertanyaan."
+            ),
+        }
+
+        message = templates.get(
+            case.status,
+            f"Halo {name}, update untuk servis {device_label} (No. Servis: {case.case_number}): {case.status}.",
+        )
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Respons untuk {case.customer_name} ({case.case_number})")
+        dialog.setMinimumWidth(420)
+        dlg_layout = QVBoxLayout(dialog)
+
+        info_label = QLabel(
+            f"Template otomatis berdasarkan status case saat ini: <b>{case.status}</b>. "
+            f"Edit dulu sesuai kebutuhan, lalu copy untuk dikirim manual via WhatsApp/SMS."
+        )
+        info_label.setWordWrap(True)
+        dlg_layout.addWidget(info_label)
+
+        text_edit = QTextEdit()
+        text_edit.setPlainText(message)
+        text_edit.setMinimumHeight(140)
+        dlg_layout.addWidget(text_edit)
+
+        btn_row = QHBoxLayout()
+        copy_button = QPushButton("Copy ke Clipboard")
+
+        def do_copy():
+            QApplication.clipboard().setText(text_edit.toPlainText())
+            copy_button.setText("✅ Tersalin!")
+
+        copy_button.clicked.connect(do_copy)
+        close_button = QPushButton("Tutup")
+        close_button.clicked.connect(dialog.accept)
+        btn_row.addWidget(copy_button)
+        btn_row.addWidget(close_button)
+        dlg_layout.addLayout(btn_row)
+
+        dialog.exec()
 
     def refresh_cases_table(self):
         status_text = self.case_status_filter.currentText()

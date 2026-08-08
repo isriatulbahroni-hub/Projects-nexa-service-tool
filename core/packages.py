@@ -73,5 +73,14 @@ def clear_app_data(serial: str, package_name: str) -> str:
     return run_adb("-s", serial, "shell", "pm", "clear", package_name)
 
 
+def trim_caches(serial: str) -> str:
+    """Bersihkan cache SEMUA aplikasi (bukan data user) - operasi aman
+    setara 'Free up space' di Settings Android. Android tidak menyediakan
+    perintah shell untuk clear cache SATU app spesifik tanpa root (cuma
+    lewat Settings UI manual), jadi ini system-wide trim via pm."""
+    # Angka besar (bytes) supaya Android trim maksimal yang bisa ditrim.
+    return run_adb("-s", serial, "shell", "pm", "trim-caches", "999999999999")
+
+
 def disable_app(serial: str, package_name: str) -> str:
     return run_adb("-s", serial, "shell", "pm", "disable-user", "--user", "0", package_name)
