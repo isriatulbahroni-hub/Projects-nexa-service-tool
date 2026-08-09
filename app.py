@@ -141,6 +141,27 @@ QLabel {
     font-size: 12px;
 }
 
+QListWidget {
+    background: #14161c;
+    border: 1px solid #22262f;
+    border-radius: 6px;
+    color: #e8eaed;
+    outline: none;
+}
+
+QListWidget::item {
+    padding: 6px 10px;
+}
+
+QListWidget::item:hover {
+    background: #1c1f27;
+}
+
+QListWidget::item:selected {
+    background: #ff5a1f;
+    color: #ffffff;
+}
+
 #navBtn {
     background: transparent;
     color: #b7bdc7;

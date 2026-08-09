@@ -84,7 +84,11 @@ class SmartDiagnosisPage(QWidget):
         self.recommendations.setReadOnly(True)
         layout.addWidget(self.recommendations, 1)
 
-    def run_scan(self, facts: dict[str, Any] | None = None) -> DiagnosisReport:
+    def run_scan(
+        self, checked: bool = False, *, facts: dict[str, Any] | None = None
+    ) -> DiagnosisReport:
+        # `checked` absorbs the bool that QPushButton.clicked always emits,
+        # so it never leaks into `facts` (which must stay a dict or None).
         if facts is None:
             facts = self.facts_provider() if self.facts_provider else {}
         report = diagnose(facts)
