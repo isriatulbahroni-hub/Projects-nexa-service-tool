@@ -32,7 +32,8 @@ def run_adb(*args: str, timeout: int = 15) -> str:
         result = subprocess.run(
             [adb_executable, *args],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
         )

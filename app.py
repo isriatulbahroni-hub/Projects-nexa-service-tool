@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QTimer, Qt, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -128,6 +128,25 @@ QLabel {
 #sidebar {
     background: #14161c;
     border-right: 1px solid #22262f;
+}
+
+#sidebarRail {
+    background: #0e0f13;
+    border-right: 1px solid #22262f;
+}
+
+#sidebarToggle {
+    background: #1a1d24;
+    color: #e8eaed;
+    border: 1px solid #2b2f3a;
+    border-radius: 8px;
+    font-size: 15px;
+}
+
+#sidebarToggle:hover {
+    background: #ff5a1f;
+    color: white;
+    border-color: #ff5a1f;
 }
 
 #brand {
@@ -350,6 +369,7 @@ class MainWindow(QMainWindow):
         self.devices: dict[str, str] = {}
         self.current_serial: str | None = None
         self.current_device = None
+        self._info_loaded_for: str | None = None
         self._current_locked_state: LockedDeviceRecoveryState | None = None
         self.last_diag = None
         self.last_score = None
@@ -379,15 +399,42 @@ class MainWindow(QMainWindow):
     # UI Construction
     # ------------------------------------------------------------------
 
+    SIDEBAR_WIDTH = 230
+    SIDEBAR_RAIL_WIDTH = 44
+
     def build_ui(self):
         root = QWidget()
         root_layout = QHBoxLayout(root)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
+        # Rail tipis & selalu terlihat berisi tombol hamburger, supaya
+        # sidebar tetap bisa dimunculkan lagi walau lagi disembunyikan.
+        rail = QFrame()
+        rail.setObjectName("sidebarRail")
+        rail.setFixedWidth(self.SIDEBAR_RAIL_WIDTH)
+        rail_layout = QVBoxLayout(rail)
+        rail_layout.setContentsMargins(6, 16, 6, 16)
+        rail_layout.setSpacing(0)
+
+        self.sidebar_toggle_button = QPushButton("☰")
+        self.sidebar_toggle_button.setObjectName("sidebarToggle")
+        self.sidebar_toggle_button.setFixedSize(32, 32)
+        self.sidebar_toggle_button.setToolTip("Tampilkan/sembunyikan menu")
+        self.sidebar_toggle_button.clicked.connect(self.toggle_sidebar)
+        rail_layout.addWidget(self.sidebar_toggle_button)
+        rail_layout.addStretch()
+
+        root_layout.addWidget(rail)
+
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(230)
+        # minimumWidth 0 supaya lebarnya bisa dianimasikan sampai 0 saat
+        # disembunyikan; maximumWidth dipakai sebagai "lebar target" normal.
+        sidebar.setMinimumWidth(0)
+        sidebar.setMaximumWidth(self.SIDEBAR_WIDTH)
+        self.sidebar_frame = sidebar
+        self._sidebar_collapsed = False
 
         side_layout = QVBoxLayout(sidebar)
         side_layout.setContentsMargins(18, 24, 18, 18)
@@ -573,6 +620,19 @@ class MainWindow(QMainWindow):
         self.refresh_diagnostics()
         self.refresh_security_check()
         self.refresh_network_info()
+
+    def toggle_sidebar(self):
+        target_width = 0 if not self._sidebar_collapsed else self.SIDEBAR_WIDTH
+        self._sidebar_collapsed = not self._sidebar_collapsed
+
+        self._sidebar_anim = QPropertyAnimation(self.sidebar_frame, b"maximumWidth", self)
+        self._sidebar_anim.setDuration(180)
+        self._sidebar_anim.setStartValue(self.sidebar_frame.width())
+        self._sidebar_anim.setEndValue(target_width)
+        self._sidebar_anim.setEasingCurve(QEasingCurve.InOutCubic)
+        self._sidebar_anim.start()
+
+        self.sidebar_toggle_button.setText("☰" if self._sidebar_collapsed else "✕")
 
     def switch_page(self, key: str):
         for k, btn in self.nav_buttons.items():
@@ -4000,14 +4060,25 @@ class MainWindow(QMainWindow):
 
         if self.current_serial and self.current_serial in devices:
             if devices[self.current_serial] == "device":
-                self.load_current_device_info()
+                # Hanya reload info lengkap (beberapa getprop via ADB) saat
+                # device ini BARU terhubung / berganti - bukan di setiap tick
+                # timer. Sebelumnya ini dipanggil ulang tiap 1.5 detik terus-
+                # menerus, membanjiri ADB dengan command dan bentrok dengan
+                # Screen Mirror yang polling tiap 900ms - itu penyebab utama
+                # mirror lag dan current_device sempat ke-reset ke None saat
+                # satu request kebetulan timeout (bikin Security Check dkk
+                # terlihat "tidak bisa jalan" padahal device tetap konek).
+                if self._info_loaded_for != self.current_serial:
+                    self.load_current_device_info()
             else:
+                self._info_loaded_for = None
                 self._set_no_device(
                     f"Device {self.current_serial}: {devices[self.current_serial]}"
                 )
         elif self.current_serial and self.current_serial not in devices:
             self.current_serial = None
             self.current_device = None
+            self._info_loaded_for = None
             self._set_no_device("Device terputus.")
 
     def _rebuild_device_selector(self):
@@ -4057,6 +4128,7 @@ class MainWindow(QMainWindow):
         try:
             device = get_device_info(self.current_serial)
             self.current_device = device
+            self._info_loaded_for = self.current_serial
 
             self.dashboard_status.setText("✅ Device connected")
             self.dashboard_info.setText(

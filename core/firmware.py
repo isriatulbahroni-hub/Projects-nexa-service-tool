@@ -30,7 +30,8 @@ def run_fastboot(*args: str, timeout: int = 60) -> str:
         result = subprocess.run(
             [fastboot_executable, *args],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
         )
