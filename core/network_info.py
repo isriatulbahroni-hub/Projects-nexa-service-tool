@@ -54,8 +54,6 @@ def _get_imei(serial: str) -> str:
 
 
 def get_network_info(serial: str) -> NetworkInfo:
-    wifi_raw = _prop(serial, "wifi.interface")
-
     try:
         wifi_status = run_adb("-s", serial, "shell", "dumpsys", "wifi").strip()
         wifi_state = "Enabled" if "Wi-Fi is enabled" in wifi_status else "Disabled/Unknown"

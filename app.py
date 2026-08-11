@@ -2094,11 +2094,14 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.Yes:
             return
 
-        try:
-            clear_app_data(self.current_device.serial, package)
-            QMessageBox.information(self, "Berhasil", f"Data {package} berhasil dihapus.")
-        except ADBError as exc:
-            QMessageBox.critical(self, "Gagal", str(exc))
+        serial = self.current_device.serial
+        worker = AsyncWorker(lambda: clear_app_data(serial, package), self)
+        worker.succeeded.connect(
+            lambda _r: QMessageBox.information(self, "Berhasil", f"Data {package} berhasil dihapus.")
+        )
+        worker.failed.connect(lambda msg: QMessageBox.critical(self, "Gagal", msg))
+        self._apps_action_worker = worker
+        worker.start()
 
     def uninstall_selected_app(self):
         package = self._get_selected_package()
@@ -2116,12 +2119,17 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.Yes:
             return
 
-        try:
-            uninstall_package(self.current_device.serial, package)
+        serial = self.current_device.serial
+
+        def _ok(_result):
             QMessageBox.information(self, "Berhasil", f"{package} berhasil di-uninstall.")
             self.refresh_apps_list()
-        except ADBError as exc:
-            QMessageBox.critical(self, "Gagal", str(exc))
+
+        worker = AsyncWorker(lambda: uninstall_package(serial, package), self)
+        worker.succeeded.connect(_ok)
+        worker.failed.connect(lambda msg: QMessageBox.critical(self, "Gagal", msg))
+        self._apps_action_worker = worker
+        worker.start()
 
     def install_apk_dialog(self):
         if not self.current_device:
@@ -2135,12 +2143,17 @@ class MainWindow(QMainWindow):
         if not file_path:
             return
 
-        try:
-            install_apk(self.current_device.serial, file_path)
+        serial = self.current_device.serial
+
+        def _ok(_result):
             QMessageBox.information(self, "Berhasil", "APK berhasil di-install.")
             self.refresh_apps_list()
-        except ADBError as exc:
-            QMessageBox.critical(self, "Install Gagal", str(exc))
+
+        worker = AsyncWorker(lambda: install_apk(serial, file_path), self)
+        worker.succeeded.connect(_ok)
+        worker.failed.connect(lambda msg: QMessageBox.critical(self, "Install Gagal", msg))
+        self._apps_action_worker = worker
+        worker.start()
 
     # ------------------------------------------------------------------
     # File Explorer Page
@@ -2548,18 +2561,35 @@ class MainWindow(QMainWindow):
         if not output_dir:
             return
 
+        if getattr(self, "_backup_worker", None) and self._backup_worker.isRunning():
+            return
+
         self.backup_log.appendPlainText(
             f"Memulai backup device {self.current_device.serial} - mohon tunggu..."
         )
-        QApplication.processEvents()
+        # backup_device() bisa makan waktu bermenit-menit (pull DCIM/
+        # WhatsApp/Pictures/Download). Sebelumnya dipanggil langsung di
+        # main thread - UI freeze total selama itu, sama seperti bug flash
+        # partition. Sekarang dijalankan di background thread.
+        self.backup_button.setEnabled(False)
+        serial = self.current_device.serial
 
-        try:
-            zip_path = backup_device(self.current_device.serial, Path(output_dir))
+        worker = AsyncWorker(lambda: backup_device(serial, Path(output_dir)), self)
+
+        def _ok(zip_path):
             self.backup_log.appendPlainText(f"Backup selesai: {zip_path}")
+            self.backup_button.setEnabled(True)
             QMessageBox.information(self, "Backup Selesai", f"File tersimpan di:\n{zip_path}")
-        except Exception as exc:
-            self.backup_log.appendPlainText(f"Backup gagal: {exc}")
-            QMessageBox.critical(self, "Backup Gagal", str(exc))
+
+        def _fail(message):
+            self.backup_log.appendPlainText(f"Backup gagal: {message}")
+            self.backup_button.setEnabled(True)
+            QMessageBox.critical(self, "Backup Gagal", message)
+
+        worker.succeeded.connect(_ok)
+        worker.failed.connect(_fail)
+        self._backup_worker = worker
+        worker.start()
 
     def run_restore(self):
         if not self.current_device:
@@ -2582,19 +2612,30 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.Yes:
             return
 
+        if getattr(self, "_restore_worker", None) and self._restore_worker.isRunning():
+            return
+
         self.backup_log.appendPlainText(f"Memulai restore dari {zip_path} - mohon tunggu...")
-        QApplication.processEvents()
+        self.restore_button.setEnabled(False)
+        serial = self.current_device.serial
 
-        try:
-            results = restore_device(self.current_device.serial, Path(zip_path))
+        worker = AsyncWorker(lambda: restore_device(serial, Path(zip_path)), self)
 
+        def _ok(results):
             for line in results:
                 self.backup_log.appendPlainText(line)
-
+            self.restore_button.setEnabled(True)
             QMessageBox.information(self, "Restore Selesai", "Proses restore selesai.")
-        except Exception as exc:
-            self.backup_log.appendPlainText(f"Restore gagal: {exc}")
-            QMessageBox.critical(self, "Restore Gagal", str(exc))
+
+        def _fail(message):
+            self.backup_log.appendPlainText(f"Restore gagal: {message}")
+            self.restore_button.setEnabled(True)
+            QMessageBox.critical(self, "Restore Gagal", message)
+
+        worker.succeeded.connect(_ok)
+        worker.failed.connect(_fail)
+        self._restore_worker = worker
+        worker.start()
 
     # ------------------------------------------------------------------
     # Network & IMEI Page
@@ -2873,22 +2914,44 @@ class MainWindow(QMainWindow):
             return
 
         serial = fastboot_devices[0]
+        image_path = self._firmware_image_path
 
         self.firmware_flash_log.appendPlainText(
             f"Flashing '{partition}' pada device {serial}..."
         )
-        QApplication.processEvents()
+        # PENTING: flash_partition() bisa makan waktu sampai 180 detik.
+        # Sebelumnya ini dipanggil langsung di main thread - UI freeze
+        # total selama proses flash berlangsung, yang berisiko bikin user
+        # mengira app hang lalu force-close di tengah proses flash. Force-
+        # close di tengah operasi flash BISA MERUSAK PARTITION/BRICK
+        # DEVICE. Sekarang dijalankan di background thread supaya UI tetap
+        # responsif dan progress terlihat jelas.
+        self.firmware_flash_button.setEnabled(False)
+        self.firmware_flash_button.setText("Sedang Flashing... Jangan cabut kabel!")
 
-        try:
-            output = flash_partition(partition, self._firmware_image_path, serial=serial)
+        worker = AsyncWorker(
+            lambda: flash_partition(partition, image_path, serial=serial), self
+        )
+
+        def _on_success(output):
             self.firmware_flash_log.appendPlainText(output or "Flash selesai.")
             self.firmware_flash_log.appendPlainText("--- SELESAI ---")
+            self.firmware_flash_button.setEnabled(True)
+            self.firmware_flash_button.setText("Flash Partition Sekarang")
             QMessageBox.information(
                 self, "Flash Berhasil", f"Partition '{partition}' berhasil diflash."
             )
-        except FastbootError as exc:
-            self.firmware_flash_log.appendPlainText(f"ERROR: {exc}")
-            QMessageBox.critical(self, "Flash Gagal", str(exc))
+
+        def _on_error(message):
+            self.firmware_flash_log.appendPlainText(f"ERROR: {message}")
+            self.firmware_flash_button.setEnabled(True)
+            self.firmware_flash_button.setText("Flash Partition Sekarang")
+            QMessageBox.critical(self, "Flash Gagal", message)
+
+        worker.succeeded.connect(_on_success)
+        worker.failed.connect(_on_error)
+        self._flash_worker = worker
+        worker.start()
 
     # ------------------------------------------------------------------
     # Placeholder Page

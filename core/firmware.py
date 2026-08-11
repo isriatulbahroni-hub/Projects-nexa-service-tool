@@ -110,7 +110,22 @@ COMMON_PARTITIONS = [
 CRITICAL_PARTITIONS = ["bootloader", "modem", "radio"]
 
 
-def flash_partition(partition: str, image_path: str, serial: str | None = None) -> str:
+def flash_partition(
+    partition: str, image_path: str, serial: str | None = None, allow_critical: bool = False
+) -> str:
+    # Defense-in-depth: sebelumnya fungsi ini akan flash partition APAPUN
+    # tanpa validasi - satu-satunya penghalang partition kritis
+    # (bootloader/modem/radio) cuma combo box di UI yang isinya dibatasi
+    # ke COMMON_PARTITIONS. Aman selama UI tidak berubah, tapi kalau ada
+    # caller lain (mis. automation/macro) yang manggil flash_partition()
+    # langsung, tidak ada yang mencegah flash partition kritis tanpa
+    # sengaja. Sekarang diblokir kecuali eksplisit di-allow.
+    if partition in CRITICAL_PARTITIONS and not allow_critical:
+        raise FastbootError(
+            f"Partition '{partition}' adalah partition kritis dan diblokir "
+            f"secara default. Set allow_critical=True kalau memang sengaja."
+        )
+
     args = []
 
     if serial:
