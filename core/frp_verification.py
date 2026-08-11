@@ -74,13 +74,18 @@ def collect_frp_verification(
     """Baca status setup/provisioning device untuk menentukan apakah
     verifikasi kepemilikan (invoice/KTP) diperlukan sebelum tindakan
     reset. Tidak pernah mengembalikan/menjalankan langkah bypass.
+
+    manufacturer/model/build/frp/bootloader dibaca lewat satu panggilan
+    `getprop` (properti ro.* sungguhan). Status setup wizard/provisioning
+    TIDAK tersedia lewat getprop di device Android manapun - itu murni
+    nilai Settings Provider, jadi dibaca terpisah lewat `settings get`.
     """
     try:
-        output = runner(serial, "getprop")
+        prop_output = runner(serial, "getprop")
     except ADBError as exc:
         raise FRPVerificationError(str(exc)) from exc
 
-    props = _parse_getprop(output)
+    props = _parse_getprop(prop_output)
 
     manufacturer = props.get("ro.product.manufacturer") or "Unknown"
     model = props.get("ro.product.model") or "Unknown"
@@ -90,10 +95,21 @@ def collect_frp_verification(
     bootloader_locked = props.get("ro.boot.flash.locked") or "Unknown"
     verified_boot_state = props.get("ro.boot.verifiedbootstate") or "Unknown"
 
-    setup_raw = props.get("ro.setupwizard.user_setup_complete")
-    provisioned_raw = props.get("sys.device_provisioned")
+    try:
+        setup_raw = runner(serial, "settings get secure user_setup_complete").strip()
+    except ADBError:
+        setup_raw = ""
+    try:
+        provisioned_raw = runner(serial, "settings get global device_provisioned").strip()
+    except ADBError:
+        provisioned_raw = ""
 
-    if setup_raw is None and provisioned_raw is None:
+    # `settings get` pada key yang tidak ada mengembalikan literal "null"
+    # (bukan string kosong) di Android sungguhan.
+    setup_missing = setup_raw in ("", "null")
+    provisioned_missing = provisioned_raw in ("", "null")
+
+    if setup_missing and provisioned_missing:
         setup_complete = False
         device_provisioned = False
         frp_status = "UNKNOWN"
