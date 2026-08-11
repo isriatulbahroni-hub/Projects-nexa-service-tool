@@ -351,6 +351,7 @@ class MainWindow(QMainWindow):
         self.current_serial: str | None = None
         self.current_device = None
         self._current_locked_state: LockedDeviceRecoveryState | None = None
+        self._last_frp_verification = None
         self.last_diag = None
         self.last_score = None
         self.last_recommendations: list[str] = []
@@ -3178,6 +3179,18 @@ class MainWindow(QMainWindow):
                 f"Catatan: {result.message}"
             )
 
+            # Simpan hasil verifikasi terakhir dan gerbang (gate) tombol
+            # reboot recovery/bootloader berdasarkan hasil ini. Default
+            # aman: kalau owner_verification_required True, tombol lanjutan
+            # dikunci sampai ada verifikasi ulang yang mengizinkan.
+            self._last_frp_verification = result
+            self.frp_recovery_button.setEnabled(
+                not result.owner_verification_required
+            )
+            self.frp_bootloader_button.setEnabled(
+                not result.owner_verification_required
+            )
+
         except FRPVerificationError as exc:
             self.frp_status_label.setText(
                 "FRP Status: ERROR"
@@ -3186,6 +3199,11 @@ class MainWindow(QMainWindow):
                 "Owner Verification: UNKNOWN"
             )
             self.frp_message_label.setText(str(exc))
+            # Status tak diketahui -> anggap verifikasi belum aman,
+            # kunci tombol lanjutan sampai berhasil dibaca ulang.
+            self._last_frp_verification = None
+            self.frp_recovery_button.setEnabled(False)
+            self.frp_bootloader_button.setEnabled(False)
 
         except Exception as exc:
             logger.exception(
@@ -3200,6 +3218,9 @@ class MainWindow(QMainWindow):
             self.frp_message_label.setText(
                 f"Gagal melakukan verifikasi: {exc}"
             )
+            self._last_frp_verification = None
+            self.frp_recovery_button.setEnabled(False)
+            self.frp_bootloader_button.setEnabled(False)
 
         finally:
             self.frp_refresh_button.setEnabled(True)
@@ -3375,6 +3396,7 @@ class MainWindow(QMainWindow):
         self.frp_operation_message_label.setText(
             f"Result verified: {result.frp_status}. Owner verification required: {result.owner_verification_required}"
         )
+        self._last_frp_verification = result
         self.frp_verify_button.setEnabled(True)
         self.frp_recovery_button.setEnabled(
             not result.owner_verification_required
@@ -3383,21 +3405,33 @@ class MainWindow(QMainWindow):
             not result.owner_verification_required
         )
 
+    def _reboot_action_buttons_allowed(self) -> bool:
+        """Tombol reboot recovery/bootloader hanya boleh aktif kalau hasil
+        verifikasi FRP terakhir yang tersimpan memang tidak mewajibkan
+        verifikasi kepemilikan. Default aman (False) kalau belum pernah
+        ada hasil verifikasi yang valid."""
+        return (
+            self._last_frp_verification is not None
+            and not self._last_frp_verification.owner_verification_required
+        )
+
     def _on_frp_action_complete(self, command_output: str, message: str):
         self.frp_operation_message_label.setText(
             f"Operation complete. {message}"
         )
         self.frp_verify_button.setEnabled(True)
-        self.frp_recovery_button.setEnabled(True)
-        self.frp_bootloader_button.setEnabled(True)
+        allowed = self._reboot_action_buttons_allowed()
+        self.frp_recovery_button.setEnabled(allowed)
+        self.frp_bootloader_button.setEnabled(allowed)
 
     def _on_frp_action_error(self, message: str):
         self.frp_operation_message_label.setText(
             f"Action failed: {message}"
         )
         self.frp_verify_button.setEnabled(True)
-        self.frp_recovery_button.setEnabled(True)
-        self.frp_bootloader_button.setEnabled(True)
+        allowed = self._reboot_action_buttons_allowed()
+        self.frp_recovery_button.setEnabled(allowed)
+        self.frp_bootloader_button.setEnabled(allowed)
 
     def _set_locked_recovery_buttons_enabled(self, enabled: bool):
         self.locked_recovery_button.setEnabled(enabled)

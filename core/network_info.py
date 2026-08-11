@@ -21,36 +21,69 @@ def _prop(serial: str, name: str) -> str:
         return "Unknown"
 
 
+def _parse_service_call_parcel(output: str) -> str:
+    """Ekstrak digit dari output 'service call iphonesubinfo' (format Parcel)."""
+    if not output or "Parcel" not in output:
+        return ""
+
+    chars = []
+    for line in output.splitlines()[1:]:
+        parts = line.split("'")
+        if len(parts) >= 2:
+            segment = parts[1].replace(".", "")
+            chars.append(segment)
+    return "".join(chars).strip()
+
+
 def _get_imei(serial: str) -> str:
-    # IMEI biasanya butuh permission khusus, coba beberapa metode fallback.
-    try:
-        output = run_adb(
-            "-s", serial, "shell", "service", "call", "iphonesubinfo", "1"
-        ).strip()
+    """Coba baca IMEI lewat ADB shell (best-effort, tanpa root).
 
-        if output and "Parcel" in output:
-            chars = []
-            for line in output.splitlines()[1:]:
-                parts = line.split("'")
-                if len(parts) >= 2:
-                    segment = parts[1].replace(".", "")
-                    chars.append(segment)
-            imei = "".join(chars).strip()
-
+    CATATAN PENTING: sejak Android 10 (API 29), membaca IMEI/device
+    identifier butuh permission READ_PRIVILEGED_PHONE_STATE, yang hanya
+    bisa dipegang aplikasi sistem. Shell ADB biasa (non-root) TIDAK bisa
+    diberi permission ini. Jadi di kebanyakan device Android 10+ stok,
+    fungsi ini akan selalu gagal dan itu BUKAN bug - itu pembatasan OS.
+    Fallback di bawah tetap dicoba untuk device lama/ROM custom yang
+    tidak menegakkan pembatasan ini secara ketat, tanpa membuat proses
+    scan network info gagal total.
+    """
+    # Transaction code 1 = getDeviceId() pada AIDL lama (pre Android 8).
+    # Beberapa ROM/versi memakai code lain (mis. 3) untuk slot SIM kedua
+    # atau interface yang berbeda; kita coba beberapa kandidat.
+    for transaction_code in ("1", "3"):
+        try:
+            output = run_adb(
+                "-s", serial, "shell", "service", "call",
+                "iphonesubinfo", transaction_code,
+            ).strip()
+            imei = _parse_service_call_parcel(output)
             if imei and any(c.isdigit() for c in imei):
                 return imei
-    except ADBError:
-        pass
+        except ADBError:
+            continue
+        except Exception:
+            # Jangan biarkan parsing output yang tidak terduga menjaTUHkan
+            # seluruh network info scan - lanjut ke fallback berikutnya.
+            continue
+
+    # Fallback: sebagian chipset (mis. beberapa build MediaTek/Spreadtrum
+    # debug) mengekspos IMEI lewat getprop non-standar. Aman dicoba karena
+    # hanya baca properti, tidak butuh permission tambahan.
+    for prop_name in ("persist.radio.imei", "ril.imei", "gsm.imei"):
+        value = _prop(serial, prop_name)
+        if value and value != "Unknown" and any(c.isdigit() for c in value):
+            return value
 
     try:
         output = run_adb("-s", serial, "shell", "dumpsys", "iphonesubinfo").strip()
-
         if output:
             return output[:100]
     except ADBError:
         pass
+    except Exception:
+        pass
 
-    return "Tidak dapat dibaca (perlu permission khusus)"
+    return "Tidak dapat dibaca (perlu permission khusus / root - dibatasi OS sejak Android 10)"
 
 
 def get_network_info(serial: str) -> NetworkInfo:
