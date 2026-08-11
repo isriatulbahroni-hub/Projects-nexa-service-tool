@@ -12,6 +12,35 @@ class ADBError(RuntimeError):
 _router = ToolRouter()
 
 
+def run_adb_binary(*args: str, timeout: int = 15) -> bytes:
+    """Sama seperti run_adb(), tapi untuk perintah yang outputnya BINARY
+    (mis. 'exec-out screencap -p'). Jangan pernah pakai run_adb() untuk ini -
+    run_adb() men-decode stdout sebagai teks UTF-8, yang akan merusak data
+    biner seperti PNG.
+    """
+    adb_executable = _resolve_adb_path()
+    if not Path(adb_executable).exists():
+        raise ADBError(f"ADB tidak ditemukan: {adb_executable}")
+
+    try:
+        result = subprocess.run(
+            [adb_executable, *args],
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ADBError("ADB timeout.") from exc
+    except OSError as exc:
+        raise ADBError(f"Gagal menjalankan ADB: {exc}") from exc
+
+    if result.returncode != 0:
+        error = (result.stderr or b"").decode("utf-8", errors="replace").strip()
+        raise ADBError(error or f"ADB gagal dengan exit code {result.returncode}")
+
+    return result.stdout
+
+
 def _resolve_adb_path() -> str:
     if ADB_PATH.exists():
         return str(ADB_PATH)

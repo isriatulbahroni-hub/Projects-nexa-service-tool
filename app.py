@@ -1,5 +1,13 @@
+import platform
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
+
+try:
+    import psutil
+except ImportError:  # pragma: no cover - optional dependency
+    psutil = None
 
 from PySide6.QtCore import QTimer, Qt, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QPixmap
@@ -9,6 +17,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -31,7 +40,7 @@ from PySide6.QtWidgets import (
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from core.adb import ADBError, get_devices_with_state, reboot_device, run_adb
+from core.adb import ADBError, get_devices_with_state, reboot_device, run_adb, run_adb_binary
 from core.config import ADB_PATH
 from core.device import get_device_info
 from core.diagnostics import (
@@ -392,6 +401,12 @@ class MainWindow(QMainWindow):
         self.timer.timeout.connect(self.refresh_device_list)
         self.timer.start(int(self.settings.get("auto_refresh_ms", 1500)))
 
+        self._app_start_time = time.time()
+        self.sysinfo_timer = QTimer(self)
+        self.sysinfo_timer.timeout.connect(self._update_system_info)
+        self.sysinfo_timer.start(2000)
+        self._update_system_info()
+
         self.refresh_device_list()
         logger.info("Nexa Service Tool started")
 
@@ -675,12 +690,12 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(32, 28, 32, 28)
-        layout.setSpacing(18)
+        layout.setSpacing(16)
 
         title = QLabel("Dashboard")
         title.setObjectName("contentTitle")
 
-        desc = QLabel("Overview perangkat dan koneksi service tool.")
+        desc = QLabel("Overview perangkat, status FRP, dan koneksi service tool.")
         desc.setObjectName("muted")
 
         header_row = QHBoxLayout()
@@ -699,51 +714,150 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(header_row)
 
-        row = QHBoxLayout()
-        row.setSpacing(16)
+        # ---------------------------------------------------------------
+        # Baris 4 stat card: Device Status, FRP Status, Bootloader, Battery
+        # ---------------------------------------------------------------
+        stats_row = QHBoxLayout()
+        stats_row.setSpacing(14)
 
-        card1 = QFrame()
-        card1.setObjectName("card")
-        c1_layout = QVBoxLayout(card1)
-        c1_layout.setContentsMargins(22, 20, 22, 20)
+        def make_stat_card(title_text: str):
+            card = QFrame()
+            card.setObjectName("card")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(18, 16, 18, 16)
+            card_layout.setSpacing(4)
 
-        c1_title = QLabel("Connected Devices")
-        c1_title.setObjectName("cardTitle")
+            label = QLabel(title_text)
+            label.setObjectName("muted")
 
-        self.dashboard_device_count = QLabel("0")
-        self.dashboard_device_count.setObjectName("scoreBig")
-        self.dashboard_device_count.setStyleSheet("color:#ff5a1f;")
+            value = QLabel("--")
+            value.setObjectName("status")
+            value.setStyleSheet("font-size:20px;")
 
-        c1_layout.addWidget(c1_title)
-        c1_layout.addWidget(self.dashboard_device_count)
+            sub = QLabel("")
+            sub.setObjectName("muted")
+            sub.setWordWrap(True)
 
-        card2 = QFrame()
-        card2.setObjectName("card")
-        c2_layout = QVBoxLayout(card2)
-        c2_layout.setContentsMargins(22, 20, 22, 20)
+            card_layout.addWidget(label)
+            card_layout.addWidget(value)
+            card_layout.addWidget(sub)
+            return card, value, sub
 
-        c2_title = QLabel("Active Device")
-        c2_title.setObjectName("cardTitle")
+        device_card, self.dashboard_status, self.dashboard_info = make_stat_card("DEVICE STATUS")
+        frp_card, self.dash_frp_value, self.dash_frp_sub = make_stat_card("FRP STATUS")
+        boot_card, self.dash_boot_value, self.dash_boot_sub = make_stat_card("BOOTLOADER")
+        batt_card, self.dash_batt_value, self.dash_batt_sub = make_stat_card("BATTERY")
 
-        self.dashboard_status = QLabel("Checking...")
-        self.dashboard_status.setObjectName("status")
+        for card in (device_card, frp_card, boot_card, batt_card):
+            stats_row.addWidget(card, 1)
 
-        self.dashboard_info = QLabel("")
-        self.dashboard_info.setObjectName("value")
+        layout.addLayout(stats_row)
 
-        c2_layout.addWidget(c2_title)
-        c2_layout.addWidget(self.dashboard_status)
-        c2_layout.addWidget(self.dashboard_info)
+        # ---------------------------------------------------------------
+        # Kolom kiri (Device Information, FRP Service, Quick Actions)
+        # dan kolom kanan (Device Connection, System Information)
+        # ---------------------------------------------------------------
+        main_row = QHBoxLayout()
+        main_row.setSpacing(16)
 
-        row.addWidget(card1, 1)
-        row.addWidget(card2, 2)
+        left_col = QVBoxLayout()
+        left_col.setSpacing(16)
+        right_col = QVBoxLayout()
+        right_col.setSpacing(16)
 
-        layout.addLayout(row)
+        def make_panel(title_text: str) -> tuple[QFrame, QVBoxLayout]:
+            card = QFrame()
+            card.setObjectName("card")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(22, 18, 22, 18)
+            card_layout.setSpacing(8)
+            head = QLabel(title_text)
+            head.setObjectName("cardTitle")
+            card_layout.addWidget(head)
+            return card, card_layout
 
+        info_card, info_layout = make_panel("Device Information")
+        self.dash_device_info = QLabel("Belum ada device terhubung.")
+        self.dash_device_info.setObjectName("value")
+        self.dash_device_info.setWordWrap(True)
+        info_layout.addWidget(self.dash_device_info)
+        left_col.addWidget(info_card)
+
+        frp_service_card, frp_service_layout = make_panel("FRP Service")
+        self.dash_frp_detail = QLabel("Belum ada data. Klik Refresh Semua setelah device terhubung.")
+        self.dash_frp_detail.setObjectName("value")
+        self.dash_frp_detail.setWordWrap(True)
+        frp_service_layout.addWidget(self.dash_frp_detail)
+        left_col.addWidget(frp_service_card)
+
+        qa_card, qa_layout = make_panel("Quick Actions")
+        qa_grid = QGridLayout()
+        qa_grid.setSpacing(10)
+        quick_actions = [
+            ("🔄 Reboot to Recovery", self.dashboard_quick_reboot_recovery),
+            ("🔧 Reboot to Bootloader", self.dashboard_quick_reboot_bootloader),
+            ("🛡️ Verify FRP Result", self.dashboard_quick_verify_frp),
+            ("⚙️ Hardware Diagnostic", lambda: self.switch_page("hardware")),
+            ("☁️ Backup Data", lambda: self.switch_page("backup")),
+            ("📷 Screenshot", self.dashboard_quick_screenshot),
+            ("💾 Save Log", self.dashboard_quick_save_log),
+        ]
+        for i, (label_text, handler) in enumerate(quick_actions):
+            btn = QPushButton(label_text)
+            btn.setObjectName("action")
+            btn.clicked.connect(handler)
+            qa_grid.addWidget(btn, i // 3, i % 3)
+        qa_layout.addLayout(qa_grid)
+        left_col.addWidget(qa_card)
+
+        conn_card, conn_layout = make_panel("Device Connection")
+        self.dash_connection_detail = QLabel("Tidak ada device terhubung.")
+        self.dash_connection_detail.setObjectName("value")
+        self.dash_connection_detail.setWordWrap(True)
+        conn_layout.addWidget(self.dash_connection_detail)
+        right_col.addWidget(conn_card)
+
+        sysinfo_card, sysinfo_layout = make_panel("System Information")
+
+        def make_meter_row(label_text: str):
+            row_layout = QHBoxLayout()
+            lbl = QLabel(label_text)
+            lbl.setObjectName("muted")
+            lbl.setFixedWidth(46)
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setValue(0)
+            bar.setTextVisible(True)
+            row_layout.addWidget(lbl)
+            row_layout.addWidget(bar, 1)
+            return row_layout, bar
+
+        cpu_row, self.dash_cpu_bar = make_meter_row("CPU")
+        ram_row, self.dash_ram_bar = make_meter_row("RAM")
+        disk_row, self.dash_disk_bar = make_meter_row("DISK")
+        sysinfo_layout.addLayout(cpu_row)
+        sysinfo_layout.addLayout(ram_row)
+        sysinfo_layout.addLayout(disk_row)
+
+        self.dash_sysinfo_label = QLabel("")
+        self.dash_sysinfo_label.setObjectName("value")
+        self.dash_sysinfo_label.setWordWrap(True)
+        sysinfo_layout.addWidget(self.dash_sysinfo_label)
+
+        right_col.addWidget(sysinfo_card)
+        right_col.addStretch()
+
+        main_row.addLayout(left_col, 2)
+        main_row.addLayout(right_col, 1)
+        layout.addLayout(main_row)
+
+        # ---------------------------------------------------------------
+        # Quick Health Check (skor diagnostics ringkas, sudah ada sebelumnya)
+        # ---------------------------------------------------------------
         score_card = QFrame()
         score_card.setObjectName("card")
         score_layout = QVBoxLayout(score_card)
-        score_layout.setContentsMargins(22, 20, 22, 20)
+        score_layout.setContentsMargins(22, 18, 22, 18)
         score_layout.setSpacing(8)
 
         score_title = QLabel("Quick Health Check")
@@ -761,9 +875,297 @@ class MainWindow(QMainWindow):
         score_layout.addWidget(self.dashboard_score_bar)
 
         layout.addWidget(score_card)
+
+        # ---------------------------------------------------------------
+        # Activity log / output console
+        # ---------------------------------------------------------------
+        console_card = QFrame()
+        console_card.setObjectName("card")
+        console_layout = QVBoxLayout(console_card)
+        console_layout.setContentsMargins(22, 18, 22, 18)
+        console_layout.setSpacing(8)
+
+        console_head_row = QHBoxLayout()
+        console_title = QLabel("Activity Log / Output Console")
+        console_title.setObjectName("cardTitle")
+        console_head_row.addWidget(console_title, 1)
+
+        console_clear_button = QPushButton("Clear")
+        console_clear_button.setObjectName("action")
+        console_clear_button.clicked.connect(lambda: self.dashboard_console.clear())
+        console_head_row.addWidget(console_clear_button)
+        console_layout.addLayout(console_head_row)
+
+        self.dashboard_console = QPlainTextEdit()
+        self.dashboard_console.setObjectName("logConsole")
+        self.dashboard_console.setReadOnly(True)
+        self.dashboard_console.setFixedHeight(160)
+        console_layout.addWidget(self.dashboard_console)
+
+        layout.addWidget(console_card)
         layout.addStretch()
 
+        # Widget siap - device count/status akan diisi oleh refresh_device_list
+        # / load_current_device_info yang sudah dipanggil dari __init__.
+        self.dash_frp_value.setText("--")
+
         return page
+
+    def _dash_log(self, text: str):
+        if not hasattr(self, "dashboard_console"):
+            return
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.dashboard_console.appendPlainText(f"[{timestamp}] {text}")
+
+    def refresh_dashboard_details(self):
+        """Ambil status FRP + diagnostics ringkas untuk dashboard. Dipanggil
+        sekali saat device baru terkonek / berubah / user klik refresh -
+        BUKAN di setiap tick timer (lihat catatan di refresh_device_list)."""
+        if not self.current_serial:
+            self.dash_frp_value.setText("--")
+            self.dash_frp_sub.setText("")
+            self.dash_boot_value.setText("--")
+            self.dash_boot_sub.setText("")
+            self.dash_batt_value.setText("--")
+            self.dash_batt_sub.setText("")
+            self.dash_frp_detail.setText("Belum ada device terhubung.")
+            self.dash_device_info.setText("Belum ada device terhubung.")
+            self.dash_connection_detail.setText("Tidak ada device terhubung.")
+            return
+
+        if getattr(self, "_dashboard_worker", None) and self._dashboard_worker.isRunning():
+            return
+
+        serial = self.current_serial
+        self._dash_log(f"Mengambil status FRP & diagnostics untuk {serial}...")
+
+        def _gather():
+            frp_state = detect_frp_service_state(serial)
+            try:
+                diag = get_diagnostics(serial)
+            except ADBError:
+                diag = None
+            return frp_state, diag
+
+        self._dashboard_worker = AsyncWorker(_gather, self)
+        self._dashboard_worker.succeeded.connect(self._on_dashboard_details_ready)
+        self._dashboard_worker.failed.connect(self._on_dashboard_details_error)
+        self._dashboard_worker.start()
+
+    def _on_dashboard_details_ready(self, result):
+        frp_state, diag = result
+
+        locked = frp_state.owner_auth_required
+        if frp_state.authorized:
+            self.dash_frp_value.setText("LOCKED" if locked else "UNLOCKED")
+            self.dash_frp_value.setStyleSheet(
+                f"font-size:20px; color:{'#ff6b6b' if locked else '#3ddc84'};"
+            )
+        else:
+            self.dash_frp_value.setText("N/A")
+            self.dash_frp_value.setStyleSheet("font-size:20px; color:#7d8590;")
+        self.dash_frp_sub.setText(
+            "Owner Verification Required" if locked else frp_state.message
+        )
+
+        unlocked_flag = (frp_state.fastboot_vars or {}).get("unlocked", "").lower()
+        if unlocked_flag in ("yes", "true", "1"):
+            boot_text, boot_color = "Unlocked", "#ffb020"
+        elif unlocked_flag in ("no", "false", "0"):
+            boot_text, boot_color = "Locked", "#3ddc84"
+        else:
+            boot_text, boot_color = "Unknown", "#7d8590"
+        self.dash_boot_value.setText(boot_text)
+        self.dash_boot_value.setStyleSheet(f"font-size:20px; color:{boot_color};")
+        self.dash_boot_sub.setText(
+            "Fastboot connected" if frp_state.fastboot_connected else "Fastboot not detected"
+        )
+
+        if diag:
+            self.dash_batt_value.setText(diag.battery_level)
+            self.dash_batt_value.setStyleSheet("font-size:20px; color:#3ddc84;")
+            self.dash_batt_sub.setText(diag.battery_status)
+        else:
+            self.dash_batt_value.setText("--")
+            self.dash_batt_value.setStyleSheet("font-size:20px;")
+            self.dash_batt_sub.setText("Tidak terbaca")
+
+        self.dash_frp_detail.setText(
+            f"Current Status       : {'LOCKED' if locked else ('UNLOCKED' if frp_state.authorized else 'N/A')}\n"
+            f"Owner Auth Required  : {'Yes' if frp_state.owner_auth_required else 'No'}\n"
+            f"FRP State            : {frp_state.frp_status or 'Unknown'}\n"
+            f"Brand Group          : {frp_state.brand_group}\n"
+            f"{frp_state.message}"
+        )
+
+        props = frp_state.device_properties or {}
+        if props:
+            self.dash_device_info.setText(
+                f"Manufacturer : {props.get('manufacturer', 'Unknown')}\n"
+                f"Brand        : {props.get('brand', 'Unknown')}\n"
+                f"Model        : {props.get('model', 'Unknown')}\n"
+                f"Device       : {props.get('device', 'Unknown')}\n"
+                f"Serial       : {frp_state.serial}"
+            )
+
+        self.dash_connection_detail.setText(
+            f"Connection     : USB\n"
+            f"ADB State      : {frp_state.adb_state}\n"
+            f"Fastboot State : {'Connected' if frp_state.fastboot_connected else '-'}"
+        )
+
+        self._dash_log("Status FRP & diagnostics diperbarui.")
+
+    def _on_dashboard_details_error(self, message: str):
+        self._dash_log(f"Gagal mengambil detail dashboard: {message}")
+
+    def _run_dashboard_action(self, fn, success_message: str, fail_prefix: str):
+        worker = AsyncWorker(fn, self)
+
+        def _ok(_result):
+            self._dash_log(success_message)
+            self.refresh_dashboard_details()
+
+        def _fail(msg):
+            self._dash_log(f"{fail_prefix}: {msg}")
+
+        worker.succeeded.connect(_ok)
+        worker.failed.connect(_fail)
+
+        if not hasattr(self, "_dashboard_action_workers"):
+            self._dashboard_action_workers = []
+        self._dashboard_action_workers.append(worker)
+        worker.finished.connect(
+            lambda: self._dashboard_action_workers.remove(worker)
+            if worker in self._dashboard_action_workers
+            else None
+        )
+        worker.start()
+
+    def dashboard_quick_reboot_recovery(self):
+        serial = self.current_serial
+        if not serial:
+            QMessageBox.warning(self, "No Device", "Hubungkan device terlebih dahulu.")
+            return
+        self._dash_log(f"Reboot to Recovery diminta untuk {serial}...")
+        self._run_dashboard_action(
+            lambda: execute_recovery_reboot(serial),
+            "Device reboot ke Recovery.",
+            "Reboot Recovery gagal",
+        )
+
+    def dashboard_quick_reboot_bootloader(self):
+        serial = self.current_serial
+        if not serial:
+            QMessageBox.warning(self, "No Device", "Hubungkan device terlebih dahulu.")
+            return
+        self._dash_log(f"Reboot to Bootloader diminta untuk {serial}...")
+        self._run_dashboard_action(
+            lambda: execute_bootloader_reboot(serial),
+            "Device reboot ke Bootloader.",
+            "Reboot Bootloader gagal",
+        )
+
+    def dashboard_quick_verify_frp(self):
+        serial = self.current_serial
+        if not serial:
+            QMessageBox.warning(self, "No Device", "Hubungkan device terlebih dahulu.")
+            return
+        self._dash_log(f"Verifikasi ulang status FRP untuk {serial}...")
+        self._run_dashboard_action(
+            lambda: verify_frp_result(serial),
+            "Verifikasi FRP selesai.",
+            "Verifikasi FRP gagal",
+        )
+
+    def dashboard_quick_screenshot(self):
+        serial = self.current_serial
+        if not serial:
+            QMessageBox.warning(self, "No Device", "Hubungkan device terlebih dahulu.")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Simpan Screenshot", f"{serial}_screenshot.png", "PNG Files (*.png)"
+        )
+        if not path:
+            return
+
+        self._dash_log(f"Mengambil screenshot dari {serial}...")
+
+        def _run():
+            # Sengaja pakai run_adb_binary(), BUKAN run_adb() - output
+            # screencap adalah PNG biner, kalau lewat run_adb() yang men-
+            # decode sebagai UTF-8 text, datanya akan rusak/corrupt.
+            return run_adb_binary("-s", serial, "exec-out", "screencap", "-p")
+
+        def _ok(data: bytes):
+            try:
+                Path(path).write_bytes(data)
+                self._dash_log(f"Screenshot disimpan: {path}")
+            except OSError as exc:
+                self._dash_log(f"Gagal menyimpan screenshot: {exc}")
+
+        worker = AsyncWorker(_run, self)
+        worker.succeeded.connect(_ok)
+        worker.failed.connect(lambda msg: self._dash_log(f"Screenshot gagal: {msg}"))
+
+        if not hasattr(self, "_dashboard_action_workers"):
+            self._dashboard_action_workers = []
+        self._dashboard_action_workers.append(worker)
+        worker.finished.connect(
+            lambda: self._dashboard_action_workers.remove(worker)
+            if worker in self._dashboard_action_workers
+            else None
+        )
+        worker.start()
+
+    def dashboard_quick_save_log(self):
+        if not hasattr(self, "dashboard_console"):
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Simpan Log", "nexa_dashboard_log.txt", "Text Files (*.txt)"
+        )
+        if not path:
+            return
+
+        try:
+            Path(path).write_text(self.dashboard_console.toPlainText(), encoding="utf-8")
+            self._dash_log(f"Log disimpan: {path}")
+        except OSError as exc:
+            self._dash_log(f"Gagal menyimpan log: {exc}")
+
+    def _update_system_info(self):
+        if not hasattr(self, "dash_cpu_bar"):
+            return
+
+        if psutil is None:
+            self.dash_sysinfo_label.setText(
+                "psutil belum terpasang.\nJalankan: pip install psutil"
+            )
+            return
+
+        try:
+            cpu = psutil.cpu_percent(interval=None)
+            mem = psutil.virtual_memory()
+            disk_path = str(Path.home().anchor) or "/"
+            disk = psutil.disk_usage(disk_path)
+        except Exception:
+            return
+
+        self.dash_cpu_bar.setValue(int(cpu))
+        self.dash_ram_bar.setValue(int(mem.percent))
+        self.dash_disk_bar.setValue(int(disk.percent))
+
+        uptime_seconds = int(time.time() - self._app_start_time)
+        hours, remainder = divmod(uptime_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+
+        self.dash_sysinfo_label.setText(
+            f"OS           : {platform.system()} {platform.release()}\n"
+            f"Tool Version : Nexa Service Tool - Smart Edition\n"
+            f"Uptime       : {hours:02d}:{minutes:02d}:{seconds:02d}"
+        )
 
     # ------------------------------------------------------------------
     # Hardware Test Page
@@ -4054,9 +4456,7 @@ class MainWindow(QMainWindow):
             self.devices = devices
             self._rebuild_device_selector()
 
-        self.dashboard_device_count.setText(
-            str(sum(1 for state in devices.values() if state == "device"))
-        )
+        self._connected_device_count = sum(1 for state in devices.values() if state == "device")
 
         if self.current_serial and self.current_serial in devices:
             if devices[self.current_serial] == "device":
@@ -4150,6 +4550,8 @@ class MainWindow(QMainWindow):
             self.reboot_button.setEnabled(True)
             self.recovery_button.setEnabled(True)
             self.bootloader_button.setEnabled(True)
+
+            self.refresh_dashboard_details()
 
         except ADBError as exc:
             self._set_no_device(str(exc))
