@@ -624,9 +624,9 @@ class MainWindow(QMainWindow):
 
     def refresh_all_data(self):
         """Reload device list + semua data yang sudah pernah di-fetch
-        (diagnostics/security/network) sekaligus - semua sudah threaded
-        di masing-masing fungsi, jadi aman dipanggil bersamaan tanpa
-        nge-freeze UI."""
+        (diagnostics/security/network/dashboard) sekaligus - semua sudah
+        threaded di masing-masing fungsi, jadi aman dipanggil bersamaan
+        tanpa nge-freeze UI."""
         self.refresh_device_list()
 
         if not self.current_device:
@@ -635,6 +635,11 @@ class MainWindow(QMainWindow):
         self.refresh_diagnostics()
         self.refresh_security_check()
         self.refresh_network_info()
+        # Sebelumnya baris ini tidak ada - card FRP Status/Bootloader/
+        # Battery/FRP Service/Device Connection di dashboard cuma keisi
+        # sekali saat device baru konek, tidak pernah ke-refresh lagi
+        # walau tombol "Refresh Semua" diklik. Sekarang ikut di-refresh.
+        self.refresh_dashboard_details()
 
     def toggle_sidebar(self):
         target_width = 0 if not self._sidebar_collapsed else self.SIDEBAR_WIDTH
@@ -765,25 +770,36 @@ class MainWindow(QMainWindow):
         right_col = QVBoxLayout()
         right_col.setSpacing(16)
 
-        def make_panel(title_text: str) -> tuple[QFrame, QVBoxLayout]:
+        def make_panel(title_text: str, with_refresh: bool = False) -> tuple[QFrame, QVBoxLayout]:
             card = QFrame()
             card.setObjectName("card")
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(22, 18, 22, 18)
             card_layout.setSpacing(8)
+
+            head_row = QHBoxLayout()
             head = QLabel(title_text)
             head.setObjectName("cardTitle")
-            card_layout.addWidget(head)
+            head_row.addWidget(head, 1)
+
+            if with_refresh:
+                refresh_btn = QPushButton("🔄 Refresh")
+                refresh_btn.setObjectName("action")
+                refresh_btn.setToolTip("Ambil ulang data ini dari device sekarang.")
+                refresh_btn.clicked.connect(self.refresh_dashboard_details)
+                head_row.addWidget(refresh_btn)
+
+            card_layout.addLayout(head_row)
             return card, card_layout
 
-        info_card, info_layout = make_panel("Device Information")
+        info_card, info_layout = make_panel("Device Information", with_refresh=True)
         self.dash_device_info = QLabel("Belum ada device terhubung.")
         self.dash_device_info.setObjectName("value")
         self.dash_device_info.setWordWrap(True)
         info_layout.addWidget(self.dash_device_info)
         left_col.addWidget(info_card)
 
-        frp_service_card, frp_service_layout = make_panel("FRP Service")
+        frp_service_card, frp_service_layout = make_panel("FRP Service", with_refresh=True)
         self.dash_frp_detail = QLabel("Belum ada data. Klik Refresh Semua setelah device terhubung.")
         self.dash_frp_detail.setObjectName("value")
         self.dash_frp_detail.setWordWrap(True)
@@ -922,6 +938,7 @@ class MainWindow(QMainWindow):
         sekali saat device baru terkonek / berubah / user klik refresh -
         BUKAN di setiap tick timer (lihat catatan di refresh_device_list)."""
         if not self.current_serial:
+            self._dash_log("Refresh dilewati - tidak ada device terhubung.")
             self.dash_frp_value.setText("--")
             self.dash_frp_sub.setText("")
             self.dash_boot_value.setText("--")
