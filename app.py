@@ -2073,15 +2073,31 @@ class MainWindow(QMainWindow):
         self.backup_log.appendPlainText(
             f"Memulai backup device {self.current_device.serial} - mohon tunggu..."
         )
-        QApplication.processEvents()
 
-        try:
-            zip_path = backup_device(self.current_device.serial, Path(output_dir))
-            self.backup_log.appendPlainText(f"Backup selesai: {zip_path}")
-            QMessageBox.information(self, "Backup Selesai", f"File tersimpan di:\n{zip_path}")
-        except Exception as exc:
-            self.backup_log.appendPlainText(f"Backup gagal: {exc}")
-            QMessageBox.critical(self, "Backup Gagal", str(exc))
+        serial = self.current_device.serial
+        self.backup_button.setEnabled(False)
+        self.restore_button.setEnabled(False)
+
+        worker = AsyncWorker(
+            lambda: backup_device(serial, Path(output_dir)),
+            self,
+        )
+        worker.succeeded.connect(self._on_backup_complete)
+        worker.failed.connect(self._on_backup_failed)
+        worker.start()
+        self._backup_worker = worker
+
+    def _on_backup_complete(self, zip_path):
+        self.backup_button.setEnabled(True)
+        self.restore_button.setEnabled(True)
+        self.backup_log.appendPlainText(f"Backup selesai: {zip_path}")
+        QMessageBox.information(self, "Backup Selesai", f"File tersimpan di:\n{zip_path}")
+
+    def _on_backup_failed(self, message: str):
+        self.backup_button.setEnabled(True)
+        self.restore_button.setEnabled(True)
+        self.backup_log.appendPlainText(f"Backup gagal: {message}")
+        QMessageBox.critical(self, "Backup Gagal", message)
 
     def run_restore(self):
         if not self.current_device:
@@ -2105,18 +2121,32 @@ class MainWindow(QMainWindow):
             return
 
         self.backup_log.appendPlainText(f"Memulai restore dari {zip_path} - mohon tunggu...")
-        QApplication.processEvents()
 
-        try:
-            results = restore_device(self.current_device.serial, Path(zip_path))
+        serial = self.current_device.serial
+        self.backup_button.setEnabled(False)
+        self.restore_button.setEnabled(False)
 
-            for line in results:
-                self.backup_log.appendPlainText(line)
+        worker = AsyncWorker(
+            lambda: restore_device(serial, Path(zip_path)),
+            self,
+        )
+        worker.succeeded.connect(self._on_restore_complete)
+        worker.failed.connect(self._on_restore_failed)
+        worker.start()
+        self._restore_worker = worker
 
-            QMessageBox.information(self, "Restore Selesai", "Proses restore selesai.")
-        except Exception as exc:
-            self.backup_log.appendPlainText(f"Restore gagal: {exc}")
-            QMessageBox.critical(self, "Restore Gagal", str(exc))
+    def _on_restore_complete(self, results):
+        self.backup_button.setEnabled(True)
+        self.restore_button.setEnabled(True)
+        for line in results:
+            self.backup_log.appendPlainText(line)
+        QMessageBox.information(self, "Restore Selesai", "Proses restore selesai.")
+
+    def _on_restore_failed(self, message: str):
+        self.backup_button.setEnabled(True)
+        self.restore_button.setEnabled(True)
+        self.backup_log.appendPlainText(f"Restore gagal: {message}")
+        QMessageBox.critical(self, "Restore Gagal", message)
 
     # ------------------------------------------------------------------
     # Network & IMEI Page
