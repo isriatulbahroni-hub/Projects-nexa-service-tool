@@ -375,6 +375,7 @@ class MainWindow(QMainWindow):
         self.last_diag = None
         self.last_score = None
         self.last_recommendations: list[str] = []
+        self.current_technician = None
 
         self.logcat_streamer: LogcatStreamer | None = None
         self.screen_mirror: ScreenMirror | None = None
@@ -495,6 +496,11 @@ class MainWindow(QMainWindow):
         version.setWordWrap(True)
         side_layout.addWidget(version)
 
+        self.technician_label = QLabel("")
+        self.technician_label.setObjectName("muted")
+        self.technician_label.setWordWrap(True)
+        side_layout.addWidget(self.technician_label)
+
         self.pages = QStackedWidget()
 
         self.dashboard_page = self.create_dashboard_page()
@@ -580,6 +586,16 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
 
         self.switch_page("dashboard")
+
+    def set_technician(self, technician) -> None:
+        """Dipanggil dari main.py setelah login berhasil, supaya sidebar
+        menampilkan siapa yang sedang login."""
+        self.current_technician = technician
+        if technician is not None:
+            role_label = "Admin" if technician.role == "admin" else "Teknisi"
+            self.technician_label.setText(f"{role_label}: {technician.display_name}")
+        else:
+            self.technician_label.setText("")
 
     def refresh_all_data(self):
         """Reload device list + semua data yang sudah pernah di-fetch
