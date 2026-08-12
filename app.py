@@ -678,7 +678,20 @@ class MainWindow(QMainWindow):
         self.refresh_device_list()
 
         if not self.current_device:
+            QMessageBox.information(
+                self, "Tidak Ada Device", "Hubungkan device dulu sebelum refresh."
+            )
             return
+
+        # Sebelumnya tombol ini tidak kasih tanda apapun kalau lagi
+        # bekerja - user tidak tahu apakah klik-nya kepencet atau
+        # prosesnya masih jalan. Sekarang tombol dinonaktifkan + labelnya
+        # berubah selama proses berjalan, dan otomatis balik normal begitu
+        # SEMUA sub-refresh (diagnostics/security/network/dashboard)
+        # benar-benar selesai (dilacak lewat sinyal `finished` bawaan
+        # QThread di masing-masing AsyncWorker, bukan asal timer/delay).
+        self.dashboard_refresh_all_button.setEnabled(False)
+        self.dashboard_refresh_all_button.setText("🔄 Memuat...")
 
         self.refresh_diagnostics()
         self.refresh_security_check()
@@ -688,6 +701,42 @@ class MainWindow(QMainWindow):
         # sekali saat device baru konek, tidak pernah ke-refresh lagi
         # walau tombol "Refresh Semua" diklik. Sekarang ikut di-refresh.
         self.refresh_dashboard_details()
+
+        workers = [
+            getattr(self, "_diag_worker", None),
+            getattr(self, "_security_worker", None),
+            getattr(self, "_network_worker", None),
+            getattr(self, "_dashboard_worker", None),
+        ]
+        workers = [w for w in workers if w is not None]
+
+        if not workers:
+            # Semua sub-refresh ternyata di-skip (mis. worker sebelumnya
+            # masih jalan) - jangan biarkan tombol nyangkut "Memuat...".
+            self.dashboard_refresh_all_button.setEnabled(True)
+            self.dashboard_refresh_all_button.setText("🔄 Refresh Semua")
+            return
+
+        self._refresh_all_pending = len(workers)
+
+        def _mark_one_done(_result=None):
+            self._refresh_all_pending -= 1
+            if self._refresh_all_pending <= 0:
+                self.dashboard_refresh_all_button.setEnabled(True)
+                self.dashboard_refresh_all_button.setText("🔄 Refresh Semua")
+                self._dash_log("Refresh Semua selesai.")
+
+        for worker in workers:
+            # Kalau worker-nya kebetulan SUDAH selesai duluan sebelum
+            # sempat kita hook (mis. worker lama yang direuse karena
+            # refresh_dashboard_details() punya guard 'skip kalau masih
+            # jalan'), sinyal finished-nya sudah lewat dan tidak akan
+            # pernah terdeteksi kalau cuma connect - tombol bisa nyangkut
+            # "Memuat..." selamanya. Makanya dicek isFinished() dulu.
+            if worker.isFinished():
+                _mark_one_done()
+            else:
+                worker.finished.connect(_mark_one_done)
 
     def toggle_sidebar(self):
         target_width = 0 if not self._sidebar_collapsed else self.SIDEBAR_WIDTH
@@ -5086,10 +5135,44 @@ class MainWindow(QMainWindow):
     def refresh_device_list(self):
         try:
             devices = get_devices_with_state()
-        except ADBError:
+            device_list_error = None
+        except ADBError as exc:
             devices = {}
+            device_list_error = str(exc)
+        except Exception as exc:  # noqa: BLE001
+            # Sebelumnya cuma ADBError yang ditangkap di sini - kalau ada
+            # exception lain (mis. bug parsing), refresh_device_list() bisa
+            # gagal diam-diam di background tanpa jejak apapun, dan dropdown
+            # "ACTIVE DEVICE" jadi kelihatan macet/kosong tanpa penjelasan.
+            # Sekarang semua kegagalan tak terduga dicatat supaya kelihatan.
+            devices = {}
+            device_list_error = f"Unexpected error: {exc}"
+            logger.exception("refresh_device_list() gagal tak terduga")
 
-        if devices != self.devices:
+        # Log status ADB HANYA saat berubah (error -> ok atau sebaliknya),
+        # bukan tiap 1.5 detik - supaya tidak spam tapi tetap kelihatan
+        # kalau ADB genuinely bermasalah terus-menerus.
+        if device_list_error != getattr(self, "_last_device_list_error", None):
+            self._last_device_list_error = device_list_error
+            if device_list_error:
+                self._dash_log(f"⚠ ADB devices gagal: {device_list_error}")
+            elif hasattr(self, "_device_list_ever_failed") and self._device_list_ever_failed:
+                self._dash_log("✅ ADB devices kembali normal.")
+        if device_list_error:
+            self._device_list_ever_failed = True
+
+        # Rebuild dropdown kalau datanya berubah, ATAU ini pemanggilan
+        # pertama kali - sebelumnya kalau "devices" kebetulan == {} persis
+        # sama dengan self.devices awal ({}), _rebuild_device_selector()
+        # TIDAK PERNAH dipanggil sama sekali, jadi dropdown-nya diam total
+        # kosong (bukan cuma nampilin placeholder "Tidak ada device") dan
+        # baru kepanggil kalau nanti datanya berubah jadi non-empty. Kalau
+        # device sempat gagal kebaca sesaat lalu balik lagi tapi isinya
+        # identik dengan snapshot terakhir yang salah, dropdown bisa nyangkut.
+        first_check = not getattr(self, "_device_list_checked_once", False)
+        self._device_list_checked_once = True
+
+        if devices != self.devices or first_check:
             self.devices = devices
             self._rebuild_device_selector()
 
