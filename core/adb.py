@@ -42,6 +42,13 @@ def run_adb_binary(*args: str, timeout: int = 15) -> bytes:
 
 
 def _resolve_adb_path() -> str:
+    # Path manual dari Settings punya prioritas tertinggi - berguna kalau
+    # auto-detect (ADB_PATH default / ToolRouter di PATH) gagal menemukan
+    # instalasi ADB di komputer teknisi.
+    override = _get_path_override("adb_path_override")
+    if override and Path(override).exists():
+        return override
+
     if ADB_PATH.exists():
         return str(ADB_PATH)
 
@@ -50,6 +57,14 @@ def _resolve_adb_path() -> str:
         return str(adb_path)
 
     return str(ADB_PATH)
+
+
+def _get_path_override(key: str) -> str:
+    try:
+        from .settings import get_settings_store
+        return get_settings_store().get(key, "") or ""
+    except Exception:
+        return ""
 
 
 def run_adb(*args: str, timeout: int = 15) -> str:

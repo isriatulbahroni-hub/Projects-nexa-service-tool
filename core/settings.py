@@ -15,7 +15,32 @@ DEFAULTS: dict[str, Any] = {
     "log_level": "INFO",
     "confirm_dangerous_actions": True,
     "mask_sensitive_identifiers": True,
+    # Nama teknisi aktif - dipakai sebagai default di semua entry audit
+    # trail (action_log). Sebelumnya semua tercatat sebagai "Technician"
+    # generik, jadi kalau ada lebih dari satu orang pakai tool ini, tidak
+    # bisa dibedakan siapa yang melakukan tindakan apa.
+    "active_technician": "",
+    "known_technicians": [],
+    # Retensi file backup lokal (hari). 0 = jangan hapus otomatis.
+    "backup_retention_days": 30,
+    # Path adb/fastboot manual, kalau auto-detect (PATH/ToolRouter) gagal.
+    "adb_path_override": "",
+    "fastboot_path_override": "",
 }
+
+
+# Singleton di level modul - supaya core/adb.py & core/firmware.py bisa
+# baca adb_path_override/fastboot_path_override tiap kali resolve path
+# TANPA harus buka+parse settings.json ulang setiap panggilan run_adb()
+# (yang bisa dipanggil sangat sering).
+settings_store: "SettingsStore" = None  # type: ignore[assignment]
+
+
+def get_settings_store() -> "SettingsStore":
+    global settings_store
+    if settings_store is None:
+        settings_store = SettingsStore()
+    return settings_store
 
 
 class SettingsStore:

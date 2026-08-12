@@ -58,3 +58,18 @@ def test_action_log_filters_by_serial(temp_db):
     assert len(temp_db.get_action_log(serial="SN1")) == 1
     assert len(temp_db.get_action_log(serial="SN2")) == 1
     assert len(temp_db.get_action_log()) == 2
+
+
+def test_action_log_default_technician_is_generic(temp_db):
+    # Kalau technician tidak diisi eksplisit, harus fallback ke default
+    # generik "Technician" (bukan string kosong) - konsisten dengan
+    # perilaku sebelum fitur identitas teknisi ditambahkan.
+    temp_db.log_action("Backup", serial="SN1", status="OK")
+    entries = temp_db.get_action_log(serial="SN1")
+    assert entries[0].technician == "Technician"
+
+
+def test_action_log_records_specific_technician(temp_db):
+    temp_db.log_action("Flash Partition", serial="SN1", status="OK", technician="Budi")
+    entries = temp_db.get_action_log(serial="SN1")
+    assert entries[0].technician == "Budi"

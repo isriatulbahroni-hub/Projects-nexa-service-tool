@@ -11,6 +11,10 @@ _router = ToolRouter()
 
 
 def _resolve_fastboot_path() -> str:
+    override = _get_path_override("fastboot_path_override")
+    if override and Path(override).exists():
+        return override
+
     if FASTBOOT_PATH.exists():
         return str(FASTBOOT_PATH)
 
@@ -19,6 +23,14 @@ def _resolve_fastboot_path() -> str:
         return str(fastboot_path)
 
     return str(FASTBOOT_PATH)
+
+
+def _get_path_override(key: str) -> str:
+    try:
+        from .settings import get_settings_store
+        return get_settings_store().get(key, "") or ""
+    except Exception:
+        return ""
 
 
 def run_fastboot(*args: str, timeout: int = 60) -> str:

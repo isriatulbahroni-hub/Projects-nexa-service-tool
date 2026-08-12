@@ -40,7 +40,14 @@ from PySide6.QtWidgets import (
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from core.adb import ADBError, get_devices_with_state, reboot_device, run_adb, run_adb_binary
+from core.adb import (
+    ADBError,
+    get_devices_with_state,
+    reboot_device,
+    run_adb,
+    run_adb_binary,
+    _resolve_adb_path,
+)
 from core.config import ADB_PATH
 from core.device import get_device_info
 from core.diagnostics import (
@@ -74,7 +81,7 @@ from core.file_explorer import (
     delete_remote,
 )
 from core.mirror import ScreenMirror, send_tap, send_swipe, send_key
-from core.backup import backup_device, restore_device
+from core.backup import backup_device, restore_device, cleanup_old_backups, is_zip_password_protected
 from core.security_check import run_security_check
 from core.firmware import (
     get_build_info,
@@ -84,12 +91,13 @@ from core.firmware import (
     COMMON_PARTITIONS,
     CRITICAL_PARTITIONS,
     FastbootError,
+    _resolve_fastboot_path,
 )
 from core.network_info import get_network_info
 from core.hardware_test import run_hardware_test
 from core.task_runner import run_in_thread
 from core.app_logging import configure_logging, get_logger
-from core.settings import SettingsStore
+from core.settings import get_settings_store
 from core.async_worker import AsyncWorker
 from core import automation
 from core.automation import Macro, MacroStep, ACTIONS, MacroError
@@ -100,6 +108,7 @@ from core.service_cases import (
     get_case,
     update_status as update_case_status,
     add_note as add_case_note,
+    get_timeline as get_case_timeline,
 )
 from core.recovery_actions import assess_access, factory_reset_guidance
 from core.device_access_recovery import diagnose_access_issue
@@ -393,7 +402,10 @@ class MainWindow(QMainWindow):
         self.screen_mirror: ScreenMirror | None = None
         self.file_explorer_path = "/sdcard"
 
-        self.settings = SettingsStore()
+        # Pakai singleton yang sama dengan core.adb/core.firmware, supaya
+        # perubahan adb_path_override/fastboot_path_override dari halaman
+        # Settings langsung kepakai tanpa perlu restart aplikasi.
+        self.settings = get_settings_store()
         self._macro_steps: list[MacroStep] = []
         self.current_case_id: int | None = None
         self._hardware_task_refs = None  # keeps (thread, worker) alive while running
@@ -414,6 +426,37 @@ class MainWindow(QMainWindow):
 
         self.refresh_device_list()
         logger.info("Nexa Service Tool started")
+
+        # First-run check: kalau ADB/Fastboot tidak bisa auto-detect,
+        # arahkan user ke Settings untuk isi path manual - daripada
+        # dibiarkan bingung karena semua fitur device diam-diam gagal
+        # tanpa penjelasan yang jelas kenapa.
+        QTimer.singleShot(300, self._check_first_run_tools)
+
+    def _check_first_run_tools(self):
+        adb_ok = Path(_resolve_adb_path()).exists()
+        fastboot_ok = Path(_resolve_fastboot_path()).exists()
+
+        if adb_ok and fastboot_ok:
+            return
+
+        missing = []
+        if not adb_ok:
+            missing.append("ADB")
+        if not fastboot_ok:
+            missing.append("Fastboot")
+
+        reply = QMessageBox.warning(
+            self, "Setup Diperlukan",
+            f"{' dan '.join(missing)} tidak ditemukan secara otomatis di komputer ini.\n\n"
+            "Sebagian besar fitur (deteksi device, diagnostics, flash, dll) "
+            "tidak akan berfungsi sampai ini diatur.\n\n"
+            "Buka halaman Settings sekarang untuk atur path manual?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+
+        if reply == QMessageBox.Yes:
+            self.switch_page("settings")
 
     # ------------------------------------------------------------------
     # UI Construction
@@ -1817,9 +1860,27 @@ class MainWindow(QMainWindow):
         audit_desc.setObjectName("muted")
         layout.addWidget(audit_desc)
 
-        self.action_log_table = QTableWidget(0, 5)
+        # Filter serial - dipakai untuk lihat "timeline" gabungan
+        # (diagnostics history + audit trail) untuk 1 device/case tertentu,
+        # menyambungkan Activity Log dengan Service Cases lewat serial yang
+        # sama (sebelumnya user harus loncat-loncat antar halaman).
+        filter_row = QHBoxLayout()
+        self.history_filter_serial = QLineEdit()
+        self.history_filter_serial.setPlaceholderText("Filter berdasarkan Serial (kosongkan untuk semua)...")
+        filter_button = QPushButton("Filter")
+        filter_button.setObjectName("action")
+        filter_button.clicked.connect(self.refresh_history_table)
+        clear_filter_button = QPushButton("Reset")
+        clear_filter_button.setObjectName("action")
+        clear_filter_button.clicked.connect(self._clear_history_filter)
+        filter_row.addWidget(self.history_filter_serial, 1)
+        filter_row.addWidget(filter_button)
+        filter_row.addWidget(clear_filter_button)
+        layout.addLayout(filter_row)
+
+        self.action_log_table = QTableWidget(0, 6)
         self.action_log_table.setHorizontalHeaderLabels(
-            ["Tanggal", "Serial", "Aksi", "Status", "Detail"]
+            ["Tanggal", "Serial", "Aksi", "Status", "Teknisi", "Detail"]
         )
         self.action_log_table.horizontalHeader().setStretchLastSection(True)
         self.action_log_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -1829,8 +1890,13 @@ class MainWindow(QMainWindow):
 
         return page
 
+    def _clear_history_filter(self):
+        self.history_filter_serial.setText("")
+        self.refresh_history_table()
+
     def refresh_history_table(self):
-        records = get_history(limit=200)
+        serial_filter = self.history_filter_serial.text().strip() or None
+        records = get_history(serial=serial_filter, limit=200)
 
         self.history_table.setRowCount(len(records))
 
@@ -1855,7 +1921,11 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "action_log_table"):
             return
 
-        entries = get_action_log(limit=200)
+        serial_filter = None
+        if hasattr(self, "history_filter_serial"):
+            serial_filter = self.history_filter_serial.text().strip() or None
+
+        entries = get_action_log(serial=serial_filter, limit=200)
         self.action_log_table.setRowCount(len(entries))
 
         for row_idx, entry in enumerate(entries):
@@ -1864,6 +1934,7 @@ class MainWindow(QMainWindow):
                 entry.serial or "-",
                 entry.action,
                 entry.status,
+                entry.technician or "-",
                 entry.detail,
             ]
 
@@ -1878,12 +1949,15 @@ class MainWindow(QMainWindow):
         semua handler tindakan berisiko. Kalau gagal menulis ke DB, gagal
         diam-diam (jangan sampai audit logging error malah menggagalkan
         aksi utamanya) tapi tetap dicatat ke logger aplikasi."""
+        technician = (self.settings.get("active_technician", "") or "Technician").strip() or "Technician"
+
         try:
             log_action_db(
                 action=action,
                 detail=detail,
                 status=status,
                 serial=serial or self.current_serial or "",
+                technician=technician,
             )
         except Exception:
             logger.exception("Gagal menulis audit log: %s", action)
@@ -2684,6 +2758,38 @@ class MainWindow(QMainWindow):
         if getattr(self, "_backup_worker", None) and self._backup_worker.isRunning():
             return
 
+        # Isi backup (DCIM, WhatsApp media, dst) adalah data pribadi
+        # pelanggan yang sensitif. Sebelumnya selalu tersimpan sebagai ZIP
+        # polos tanpa proteksi apapun - kalau laptop teknisi dicuri/kena
+        # malware, semua foto/chat pelanggan lama bisa bocor. Sekarang
+        # ditawarkan opsi enkripsi AES.
+        encrypt_reply = QMessageBox.question(
+            self, "Enkripsi Backup?",
+            "Backup ini akan berisi data pribadi pelanggan (foto, chat "
+            "WhatsApp, dll).\n\nEnkripsi dengan password supaya lebih aman "
+            "kalau file backup ini hilang/dicuri?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+
+        password = None
+        if encrypt_reply == QMessageBox.Yes:
+            password, ok = QInputDialog.getText(
+                self, "Password Backup",
+                "Masukkan password untuk backup ini (min. 4 karakter):",
+                QLineEdit.Password,
+            )
+            if not ok:
+                return
+            password = password.strip()
+            if password and len(password) < 4:
+                QMessageBox.warning(self, "Password Terlalu Pendek", "Minimal 4 karakter.")
+                return
+            if not password:
+                QMessageBox.information(
+                    self, "Tanpa Enkripsi", "Password kosong - backup akan disimpan tanpa enkripsi."
+                )
+                password = None
+
         self.backup_log.appendPlainText(
             f"Memulai backup device {self.current_device.serial} - mohon tunggu..."
         )
@@ -2696,22 +2802,29 @@ class MainWindow(QMainWindow):
         self.backup_restore_progress.setValue(0)
         self.backup_restore_progress.setFormat("Memulai backup...")
         serial = self.current_device.serial
+        self._last_backup_output_dir = output_dir
+        self._last_backup_password = password
 
         def _do_backup():
             return backup_device(
                 serial,
                 Path(output_dir),
                 progress_callback=lambda i, t, name: worker.progress.emit(i, t, name),
+                password=password,
             )
 
         worker = AsyncWorker(_do_backup, self)
         worker.progress.connect(self._on_backup_restore_progress)
 
         def _ok(zip_path):
-            self.backup_log.appendPlainText(f"Backup selesai: {zip_path}")
+            enc_note = " (terenkripsi)" if password else ""
+            self.backup_log.appendPlainText(f"Backup selesai{enc_note}: {zip_path}")
             self.backup_button.setEnabled(True)
             self.log_action(
-                "Backup", detail=f"Tersimpan di {zip_path}", status="OK", serial=serial
+                "Backup",
+                detail=f"Tersimpan di {zip_path}{enc_note}",
+                status="OK",
+                serial=serial,
             )
             QMessageBox.information(self, "Backup Selesai", f"File tersimpan di:\n{zip_path}")
 
@@ -2750,6 +2863,20 @@ class MainWindow(QMainWindow):
         if getattr(self, "_restore_worker", None) and self._restore_worker.isRunning():
             return
 
+        password = None
+        if is_zip_password_protected(Path(zip_path)):
+            password, ok = QInputDialog.getText(
+                self, "Password Backup",
+                "File backup ini dienkripsi. Masukkan password:",
+                QLineEdit.Password,
+            )
+            if not ok:
+                return
+            password = password.strip()
+            if not password:
+                QMessageBox.warning(self, "Password Kosong", "Password wajib diisi untuk backup terenkripsi.")
+                return
+
         self.backup_log.appendPlainText(f"Memulai restore dari {zip_path} - mohon tunggu...")
         self.restore_button.setEnabled(False)
         self.backup_restore_progress.setRange(0, 1)
@@ -2762,6 +2889,7 @@ class MainWindow(QMainWindow):
                 serial,
                 Path(zip_path),
                 progress_callback=lambda i, t, name: worker.progress.emit(i, t, name),
+                password=password,
             )
 
         worker = AsyncWorker(_do_restore, self)
@@ -3264,9 +3392,13 @@ class MainWindow(QMainWindow):
         self.case_response_button = QPushButton("💬 Respons ke Customer")
         self.case_response_button.setObjectName("action")
         self.case_response_button.clicked.connect(self.generate_customer_response)
+        self.case_timeline_button = QPushButton("📜 Lihat Timeline")
+        self.case_timeline_button.setObjectName("action")
+        self.case_timeline_button.clicked.connect(self.view_case_timeline)
         action_row.addWidget(self.case_update_status_button)
         action_row.addWidget(self.case_add_note_button)
         action_row.addWidget(self.case_response_button)
+        action_row.addWidget(self.case_timeline_button)
         action_row.addStretch()
         layout.addLayout(action_row)
 
@@ -3432,6 +3564,79 @@ class MainWindow(QMainWindow):
             return None
         item = self.cases_table.item(row, 0)
         return item.data(Qt.UserRole) if item else None
+
+    def view_case_timeline(self):
+        """Timeline gabungan untuk 1 case: perubahan status case +
+        riwayat diagnostics + audit trail tindakan (backup/restore/flash/
+        dst) - semuanya disatukan berdasarkan device_serial, yang
+        sebelumnya cuma bisa dilihat terpisah-pisah di halaman berbeda."""
+        case_id = self._selected_case_id()
+
+        if case_id is None:
+            QMessageBox.warning(self, "Pilih Case", "Pilih salah satu case dari daftar dulu.")
+            return
+
+        try:
+            case = get_case(case_id)
+            case_events = get_case_timeline(case_id)
+        except Exception as exc:
+            QMessageBox.critical(self, "Gagal Memuat Timeline", str(exc))
+            return
+
+        entries = []
+
+        for ev in case_events:
+            entries.append((
+                ev.get("created_at", ""),
+                "Case",
+                f"{ev.get('event_type', '')}: {ev.get('old_value', '') or '-'} → {ev.get('new_value', '') or '-'}"
+                + (f" ({ev.get('note')})" if ev.get("note") else ""),
+            ))
+
+        if case.device_serial:
+            for rec in get_history(serial=case.device_serial, limit=100):
+                entries.append((
+                    rec.created_at, "Diagnostics",
+                    f"Health score {rec.health_score} - {rec.recommendations or '-'}",
+                ))
+
+            for act in get_action_log(serial=case.device_serial, limit=100):
+                entries.append((
+                    act.created_at, "Aksi",
+                    f"{act.action} [{act.status}] oleh {act.technician or '-'} - {act.detail or '-'}",
+                ))
+
+        entries.sort(key=lambda e: e[0])
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Timeline - {case.case_number} ({case.customer_name})")
+        dialog.resize(640, 480)
+        dialog_layout = QVBoxLayout(dialog)
+
+        header = QLabel(
+            f"<b>{case.case_number}</b> - {case.customer_name}<br>"
+            f"Device: {case.device_serial or '-'} | Status: {case.status}<br>"
+            f"Keluhan: {case.complaint}"
+        )
+        header.setWordWrap(True)
+        dialog_layout.addWidget(header)
+
+        timeline_table = QTableWidget(len(entries), 3)
+        timeline_table.setHorizontalHeaderLabels(["Waktu", "Tipe", "Detail"])
+        timeline_table.horizontalHeader().setStretchLastSection(True)
+        timeline_table.setEditTriggers(QTableWidget.NoEditTriggers)
+
+        for row_idx, (ts, kind, detail) in enumerate(entries):
+            for col_idx, val in enumerate([ts, kind, detail]):
+                timeline_table.setItem(row_idx, col_idx, QTableWidgetItem(str(val)))
+
+        dialog_layout.addWidget(timeline_table)
+
+        close_button = QPushButton("Tutup")
+        close_button.clicked.connect(dialog.accept)
+        dialog_layout.addWidget(close_button)
+
+        dialog.exec()
 
     def update_selected_case_status(self):
         case_id = self._selected_case_id()
@@ -4437,6 +4642,119 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(card)
 
+        # ------------------------------------------------------------
+        # Identitas Teknisi - dipakai sebagai default di audit trail
+        # (action_log), supaya tercatat siapa yang melakukan tindakan,
+        # bukan cuma "Technician" generik.
+        # ------------------------------------------------------------
+        technician_card = QFrame()
+        technician_card.setObjectName("card")
+        technician_layout = QVBoxLayout(technician_card)
+        technician_layout.setContentsMargins(22, 20, 22, 20)
+        technician_layout.setSpacing(10)
+
+        technician_title = QLabel("Teknisi Aktif")
+        technician_title.setObjectName("cardTitle")
+        technician_layout.addWidget(technician_title)
+
+        technician_desc = QLabel(
+            "Nama ini dipakai untuk mencatat siapa yang melakukan tindakan "
+            "di Activity Log (Audit Trail)."
+        )
+        technician_desc.setObjectName("muted")
+        technician_desc.setWordWrap(True)
+        technician_layout.addWidget(technician_desc)
+
+        self.settings_technician = QComboBox()
+        self.settings_technician.setEditable(True)
+        technician_layout.addWidget(self.settings_technician)
+
+        layout.addWidget(technician_card)
+
+        # ------------------------------------------------------------
+        # Backup - retensi otomatis
+        # ------------------------------------------------------------
+        backup_card = QFrame()
+        backup_card.setObjectName("card")
+        backup_layout = QVBoxLayout(backup_card)
+        backup_layout.setContentsMargins(22, 20, 22, 20)
+        backup_layout.setSpacing(10)
+
+        backup_title = QLabel("Backup")
+        backup_title.setObjectName("cardTitle")
+        backup_layout.addWidget(backup_title)
+
+        retention_label = QLabel("Hapus otomatis file backup lokal setelah (hari, 0 = jangan hapus)")
+        retention_label.setObjectName("muted")
+        retention_label.setWordWrap(True)
+        self.settings_backup_retention = QLineEdit()
+        backup_layout.addWidget(retention_label)
+        backup_layout.addWidget(self.settings_backup_retention)
+
+        cleanup_button = QPushButton("Bersihkan Backup Lama Sekarang")
+        cleanup_button.setObjectName("action")
+        cleanup_button.clicked.connect(self.run_backup_cleanup)
+        backup_layout.addWidget(cleanup_button)
+
+        layout.addWidget(backup_card)
+
+        # ------------------------------------------------------------
+        # Path ADB/Fastboot manual - dipakai kalau auto-detect gagal.
+        # ------------------------------------------------------------
+        tools_card = QFrame()
+        tools_card.setObjectName("card")
+        tools_layout = QVBoxLayout(tools_card)
+        tools_layout.setContentsMargins(22, 20, 22, 20)
+        tools_layout.setSpacing(10)
+
+        tools_title = QLabel("Path ADB / Fastboot Manual")
+        tools_title.setObjectName("cardTitle")
+        tools_layout.addWidget(tools_title)
+
+        tools_desc = QLabel(
+            "Kosongkan kalau auto-detect sudah bekerja. Isi manual kalau "
+            "aplikasi tidak bisa menemukan adb.exe/fastboot.exe secara otomatis."
+        )
+        tools_desc.setObjectName("muted")
+        tools_desc.setWordWrap(True)
+        tools_layout.addWidget(tools_desc)
+
+        adb_row = QHBoxLayout()
+        self.settings_adb_path = QLineEdit()
+        self.settings_adb_path.setPlaceholderText("Path ke adb.exe...")
+        adb_browse = QPushButton("Cari...")
+        adb_browse.setObjectName("action")
+        adb_browse.clicked.connect(lambda: self._browse_tool_path(self.settings_adb_path, "adb"))
+        adb_row.addWidget(self.settings_adb_path, 1)
+        adb_row.addWidget(adb_browse)
+        tools_layout.addWidget(QLabel("ADB"))
+        tools_layout.addLayout(adb_row)
+
+        fastboot_row = QHBoxLayout()
+        self.settings_fastboot_path = QLineEdit()
+        self.settings_fastboot_path.setPlaceholderText("Path ke fastboot.exe...")
+        fastboot_browse = QPushButton("Cari...")
+        fastboot_browse.setObjectName("action")
+        fastboot_browse.clicked.connect(
+            lambda: self._browse_tool_path(self.settings_fastboot_path, "fastboot")
+        )
+        fastboot_row.addWidget(self.settings_fastboot_path, 1)
+        fastboot_row.addWidget(fastboot_browse)
+        tools_layout.addWidget(QLabel("Fastboot"))
+        tools_layout.addLayout(fastboot_row)
+
+        self.settings_tools_status = QLabel("")
+        self.settings_tools_status.setObjectName("muted")
+        self.settings_tools_status.setWordWrap(True)
+        tools_layout.addWidget(self.settings_tools_status)
+
+        check_tools_button = QPushButton("Cek Status ADB/Fastboot")
+        check_tools_button.setObjectName("action")
+        check_tools_button.clicked.connect(self.check_tool_paths)
+        tools_layout.addWidget(check_tools_button)
+
+        layout.addWidget(tools_card)
+
         self.settings_save_button = QPushButton("Simpan Settings")
         self.settings_save_button.setObjectName("actionPrimary")
         self.settings_save_button.clicked.connect(self.save_settings_form)
@@ -4444,6 +4762,49 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
         return page
+
+    def _browse_tool_path(self, line_edit: QLineEdit, tool_name: str):
+        filter_str = "Executable (*.exe);;All Files (*)" if sys.platform == "win32" else "All Files (*)"
+        path, _ = QFileDialog.getOpenFileName(self, f"Pilih {tool_name}", "", filter_str)
+        if path:
+            line_edit.setText(path)
+
+    def check_tool_paths(self):
+        adb_path = _resolve_adb_path()
+        fastboot_path = _resolve_fastboot_path()
+
+        adb_ok = Path(adb_path).exists()
+        fastboot_ok = Path(fastboot_path).exists()
+
+        self.settings_tools_status.setText(
+            f"ADB: {'✅ ' if adb_ok else '❌ tidak ditemukan - '}{adb_path}\n"
+            f"Fastboot: {'✅ ' if fastboot_ok else '❌ tidak ditemukan - '}{fastboot_path}"
+        )
+
+    def run_backup_cleanup(self):
+        days = self.settings.get("backup_retention_days", 30)
+        try:
+            days = int(days)
+        except (TypeError, ValueError):
+            days = 30
+
+        if days <= 0:
+            QMessageBox.information(
+                self, "Retensi Nonaktif",
+                "Retensi backup di-set 0 (jangan hapus otomatis) - tidak ada yang dihapus."
+            )
+            return
+
+        removed = cleanup_old_backups(Path.home() / "NexaServiceBackups", days)
+        # Juga bersihkan folder mana pun yang dipilih user lewat dialog,
+        # karena backup_device() menyimpan ke folder pilihan user (bukan
+        # selalu ~/NexaServiceBackups) - lihat run_backup().
+        if getattr(self, "_last_backup_output_dir", None):
+            removed += cleanup_old_backups(Path(self._last_backup_output_dir), days)
+
+        QMessageBox.information(
+            self, "Pembersihan Selesai", f"{removed} file backup lama (> {days} hari) dihapus."
+        )
 
     def _toggle_confirm_dangerous_label(self, checked: bool):
         self.settings_confirm_dangerous.setText(
@@ -4470,6 +4831,22 @@ class MainWindow(QMainWindow):
         self.settings_mask_identifiers.setChecked(mask)
         self._toggle_mask_identifiers_label(mask)
 
+        known = self.settings.get("known_technicians", []) or []
+        active = self.settings.get("active_technician", "") or ""
+        self.settings_technician.clear()
+        self.settings_technician.addItems(known)
+        if active and active not in known:
+            self.settings_technician.addItem(active)
+        idx = self.settings_technician.findText(active)
+        if idx >= 0:
+            self.settings_technician.setCurrentIndex(idx)
+        else:
+            self.settings_technician.setCurrentText(active)
+
+        self.settings_backup_retention.setText(str(self.settings.get("backup_retention_days", 30)))
+        self.settings_adb_path.setText(self.settings.get("adb_path_override", "") or "")
+        self.settings_fastboot_path.setText(self.settings.get("fastboot_path_override", "") or "")
+
     def save_settings_form(self):
         try:
             refresh_ms = int(self.settings_refresh_ms.text().strip())
@@ -4479,11 +4856,29 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Nilai Tidak Valid", str(exc) or "Auto-refresh harus berupa angka.")
             return
 
+        try:
+            retention_days = int(self.settings_backup_retention.text().strip() or "0")
+            if retention_days < 0:
+                raise ValueError("Retensi backup tidak boleh negatif.")
+        except ValueError as exc:
+            QMessageBox.warning(self, "Nilai Tidak Valid", str(exc) or "Retensi backup harus berupa angka.")
+            return
+
+        technician_name = self.settings_technician.currentText().strip()
+        known = list(self.settings.get("known_technicians", []) or [])
+        if technician_name and technician_name not in known:
+            known.append(technician_name)
+
         self.settings.update({
             "auto_refresh_ms": refresh_ms,
             "log_level": self.settings_log_level.currentText(),
             "confirm_dangerous_actions": self.settings_confirm_dangerous.isChecked(),
             "mask_sensitive_identifiers": self.settings_mask_identifiers.isChecked(),
+            "active_technician": technician_name,
+            "known_technicians": known,
+            "backup_retention_days": retention_days,
+            "adb_path_override": self.settings_adb_path.text().strip(),
+            "fastboot_path_override": self.settings_fastboot_path.text().strip(),
         })
 
         self.timer.setInterval(refresh_ms)
