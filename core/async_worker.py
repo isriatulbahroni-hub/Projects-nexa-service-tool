@@ -11,10 +11,16 @@ class AsyncWorker(QThread):
         worker.succeeded.connect(on_result)
         worker.failed.connect(on_error)
         worker.start()
+
+    Untuk operasi panjang yang butuh progress (backup/restore), fungsi yang
+    dijalankan bisa memanggil `worker.progress.emit(current, total, label)`
+    dari dalam thread - PySide otomatis meng-antrikan sinyal ini supaya
+    slot yang terhubung tetap jalan aman di GUI thread.
     """
 
     succeeded = Signal(object)
     failed = Signal(str)
+    progress = Signal(int, int, str)
 
     def __init__(self, fn, parent=None):
         super().__init__(parent)

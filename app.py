@@ -48,7 +48,12 @@ from core.diagnostics import (
     get_diagnostics,
     health_score_label,
 )
-from core.database import get_history, save_service_record
+from core.database import (
+    get_history,
+    save_service_record,
+    log_action as log_action_db,
+    get_action_log,
+)
 from core.device_diagnostics import run_device_diagnostics
 from core.logcat import LogcatStreamer
 from core.report import generate_service_report
@@ -817,6 +822,8 @@ class MainWindow(QMainWindow):
             ("☁️ Backup Data", lambda: self.switch_page("backup")),
             ("📷 Screenshot", self.dashboard_quick_screenshot),
             ("💾 Save Log", self.dashboard_quick_save_log),
+            ("🖨️ Export Laporan PDF", lambda: self.switch_page("diagnostics")),
+            ("📜 Activity Log", lambda: self.switch_page("history")),
         ]
         for i, (label_text, handler) in enumerate(quick_actions):
             btn = QPushButton(label_text)
@@ -1036,15 +1043,20 @@ class MainWindow(QMainWindow):
     def _on_dashboard_details_error(self, message: str):
         self._dash_log(f"Gagal mengambil detail dashboard: {message}")
 
-    def _run_dashboard_action(self, fn, success_message: str, fail_prefix: str):
+    def _run_dashboard_action(self, fn, success_message: str, fail_prefix: str, action_name: str = ""):
+        serial = self.current_serial
         worker = AsyncWorker(fn, self)
 
         def _ok(_result):
             self._dash_log(success_message)
+            if action_name:
+                self.log_action(action_name, detail=success_message, status="OK", serial=serial)
             self.refresh_dashboard_details()
 
         def _fail(msg):
             self._dash_log(f"{fail_prefix}: {msg}")
+            if action_name:
+                self.log_action(action_name, detail=msg, status="GAGAL", serial=serial)
 
         worker.succeeded.connect(_ok)
         worker.failed.connect(_fail)
@@ -1069,6 +1081,7 @@ class MainWindow(QMainWindow):
             lambda: execute_recovery_reboot(serial),
             "Device reboot ke Recovery.",
             "Reboot Recovery gagal",
+            action_name="Reboot to Recovery",
         )
 
     def dashboard_quick_reboot_bootloader(self):
@@ -1081,6 +1094,7 @@ class MainWindow(QMainWindow):
             lambda: execute_bootloader_reboot(serial),
             "Device reboot ke Bootloader.",
             "Reboot Bootloader gagal",
+            action_name="Reboot to Bootloader",
         )
 
     def dashboard_quick_verify_frp(self):
@@ -1093,6 +1107,7 @@ class MainWindow(QMainWindow):
             lambda: verify_frp_result(serial),
             "Verifikasi FRP selesai.",
             "Verifikasi FRP gagal",
+            action_name="Verify FRP Result",
         )
 
     def dashboard_quick_screenshot(self):
@@ -1609,6 +1624,10 @@ class MainWindow(QMainWindow):
                 health_score=self.last_score or 0,
                 recommendations=self.last_recommendations,
             )
+            self.log_action(
+                "Save Diagnostics", detail=f"Score {self.last_score}", status="OK",
+                serial=self.current_device.serial,
+            )
             QMessageBox.information(
                 self, "Tersimpan", "Hasil diagnostics berhasil disimpan ke riwayat."
             )
@@ -1639,6 +1658,10 @@ class MainWindow(QMainWindow):
                 diag=self.last_diag,
                 health_score=self.last_score or 0,
                 recommendations=self.last_recommendations,
+            )
+            self.log_action(
+                "Export Laporan PDF", detail=file_path, status="OK",
+                serial=self.current_device.serial,
             )
             QMessageBox.information(
                 self, "Export Berhasil", f"Laporan tersimpan di:\n{file_path}"
@@ -1778,6 +1801,32 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self.history_table)
 
+        # -----------------------------------------------------------
+        # Activity Log / Audit Trail - catatan tindakan berisiko
+        # (backup, restore, uninstall, install, flash, verifikasi FRP,
+        # reboot recovery/bootloader) yang sebelumnya tidak tercatat
+        # sama sekali. Penting untuk akuntabilitas ke pelanggan.
+        # -----------------------------------------------------------
+        audit_title = QLabel("Activity Log (Audit Trail)")
+        audit_title.setObjectName("cardTitle")
+        layout.addWidget(audit_title)
+
+        audit_desc = QLabel(
+            "Catatan semua tindakan berisiko yang dilakukan lewat service tool ini."
+        )
+        audit_desc.setObjectName("muted")
+        layout.addWidget(audit_desc)
+
+        self.action_log_table = QTableWidget(0, 5)
+        self.action_log_table.setHorizontalHeaderLabels(
+            ["Tanggal", "Serial", "Aksi", "Status", "Detail"]
+        )
+        self.action_log_table.horizontalHeader().setStretchLastSection(True)
+        self.action_log_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.action_log_table.setFixedHeight(220)
+
+        layout.addWidget(self.action_log_table)
+
         return page
 
     def refresh_history_table(self):
@@ -1799,6 +1848,48 @@ class MainWindow(QMainWindow):
             for col_idx, val in enumerate(values):
                 item = QTableWidgetItem(val)
                 self.history_table.setItem(row_idx, col_idx, item)
+
+        self.refresh_action_log_table()
+
+    def refresh_action_log_table(self):
+        if not hasattr(self, "action_log_table"):
+            return
+
+        entries = get_action_log(limit=200)
+        self.action_log_table.setRowCount(len(entries))
+
+        for row_idx, entry in enumerate(entries):
+            values = [
+                entry.created_at,
+                entry.serial or "-",
+                entry.action,
+                entry.status,
+                entry.detail,
+            ]
+
+            for col_idx, val in enumerate(values):
+                item = QTableWidgetItem(val)
+                self.action_log_table.setItem(row_idx, col_idx, item)
+
+    def log_action(
+        self, action: str, detail: str = "", status: str = "OK", serial: str | None = None
+    ):
+        """Wrapper tipis di atas core.database.log_action() - dipanggil dari
+        semua handler tindakan berisiko. Kalau gagal menulis ke DB, gagal
+        diam-diam (jangan sampai audit logging error malah menggagalkan
+        aksi utamanya) tapi tetap dicatat ke logger aplikasi."""
+        try:
+            log_action_db(
+                action=action,
+                detail=detail,
+                status=status,
+                serial=serial or self.current_serial or "",
+            )
+        except Exception:
+            logger.exception("Gagal menulis audit log: %s", action)
+
+        if hasattr(self, "action_log_table"):
+            self.refresh_action_log_table()
 
     # ------------------------------------------------------------------
     # Security Check Page
@@ -2096,10 +2187,17 @@ class MainWindow(QMainWindow):
 
         serial = self.current_device.serial
         worker = AsyncWorker(lambda: clear_app_data(serial, package), self)
-        worker.succeeded.connect(
-            lambda _r: QMessageBox.information(self, "Berhasil", f"Data {package} berhasil dihapus.")
-        )
-        worker.failed.connect(lambda msg: QMessageBox.critical(self, "Gagal", msg))
+
+        def _ok(_r):
+            QMessageBox.information(self, "Berhasil", f"Data {package} berhasil dihapus.")
+            self.log_action("Clear App Data", detail=package, status="OK", serial=serial)
+
+        def _fail(msg):
+            QMessageBox.critical(self, "Gagal", msg)
+            self.log_action("Clear App Data", detail=f"{package}: {msg}", status="GAGAL", serial=serial)
+
+        worker.succeeded.connect(_ok)
+        worker.failed.connect(_fail)
         self._apps_action_worker = worker
         worker.start()
 
@@ -2123,11 +2221,16 @@ class MainWindow(QMainWindow):
 
         def _ok(_result):
             QMessageBox.information(self, "Berhasil", f"{package} berhasil di-uninstall.")
+            self.log_action("Uninstall App", detail=package, status="OK", serial=serial)
             self.refresh_apps_list()
+
+        def _fail(msg):
+            QMessageBox.critical(self, "Gagal", msg)
+            self.log_action("Uninstall App", detail=f"{package}: {msg}", status="GAGAL", serial=serial)
 
         worker = AsyncWorker(lambda: uninstall_package(serial, package), self)
         worker.succeeded.connect(_ok)
-        worker.failed.connect(lambda msg: QMessageBox.critical(self, "Gagal", msg))
+        worker.failed.connect(_fail)
         self._apps_action_worker = worker
         worker.start()
 
@@ -2147,11 +2250,16 @@ class MainWindow(QMainWindow):
 
         def _ok(_result):
             QMessageBox.information(self, "Berhasil", "APK berhasil di-install.")
+            self.log_action("Install APK", detail=file_path, status="OK", serial=serial)
             self.refresh_apps_list()
+
+        def _fail(msg):
+            QMessageBox.critical(self, "Install Gagal", msg)
+            self.log_action("Install APK", detail=f"{file_path}: {msg}", status="GAGAL", serial=serial)
 
         worker = AsyncWorker(lambda: install_apk(serial, file_path), self)
         worker.succeeded.connect(_ok)
-        worker.failed.connect(lambda msg: QMessageBox.critical(self, "Install Gagal", msg))
+        worker.failed.connect(_fail)
         self._apps_action_worker = worker
         worker.start()
 
@@ -2543,6 +2651,12 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(btn_row)
 
+        self.backup_restore_progress = QProgressBar()
+        self.backup_restore_progress.setRange(0, 1)
+        self.backup_restore_progress.setValue(0)
+        self.backup_restore_progress.setFormat("Belum ada proses berjalan")
+        layout.addWidget(self.backup_restore_progress)
+
         self.backup_log = QPlainTextEdit()
         self.backup_log.setObjectName("logConsole")
         self.backup_log.setReadOnly(True)
@@ -2550,6 +2664,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.backup_log)
 
         return page
+
+    def _on_backup_restore_progress(self, current: int, total: int, label: str):
+        self.backup_restore_progress.setRange(0, max(total, 1))
+        self.backup_restore_progress.setValue(current)
+        self.backup_restore_progress.setFormat(f"{current}/{total} - {label}")
+        self.backup_log.appendPlainText(f"[{current}/{total}] Memproses {label}...")
 
     def run_backup(self):
         if not self.current_device:
@@ -2572,18 +2692,33 @@ class MainWindow(QMainWindow):
         # main thread - UI freeze total selama itu, sama seperti bug flash
         # partition. Sekarang dijalankan di background thread.
         self.backup_button.setEnabled(False)
+        self.backup_restore_progress.setRange(0, 1)
+        self.backup_restore_progress.setValue(0)
+        self.backup_restore_progress.setFormat("Memulai backup...")
         serial = self.current_device.serial
 
-        worker = AsyncWorker(lambda: backup_device(serial, Path(output_dir)), self)
+        def _do_backup():
+            return backup_device(
+                serial,
+                Path(output_dir),
+                progress_callback=lambda i, t, name: worker.progress.emit(i, t, name),
+            )
+
+        worker = AsyncWorker(_do_backup, self)
+        worker.progress.connect(self._on_backup_restore_progress)
 
         def _ok(zip_path):
             self.backup_log.appendPlainText(f"Backup selesai: {zip_path}")
             self.backup_button.setEnabled(True)
+            self.log_action(
+                "Backup", detail=f"Tersimpan di {zip_path}", status="OK", serial=serial
+            )
             QMessageBox.information(self, "Backup Selesai", f"File tersimpan di:\n{zip_path}")
 
         def _fail(message):
             self.backup_log.appendPlainText(f"Backup gagal: {message}")
             self.backup_button.setEnabled(True)
+            self.log_action("Backup", detail=message, status="GAGAL", serial=serial)
             QMessageBox.critical(self, "Backup Gagal", message)
 
         worker.succeeded.connect(_ok)
@@ -2617,19 +2752,34 @@ class MainWindow(QMainWindow):
 
         self.backup_log.appendPlainText(f"Memulai restore dari {zip_path} - mohon tunggu...")
         self.restore_button.setEnabled(False)
+        self.backup_restore_progress.setRange(0, 1)
+        self.backup_restore_progress.setValue(0)
+        self.backup_restore_progress.setFormat("Memulai restore...")
         serial = self.current_device.serial
 
-        worker = AsyncWorker(lambda: restore_device(serial, Path(zip_path)), self)
+        def _do_restore():
+            return restore_device(
+                serial,
+                Path(zip_path),
+                progress_callback=lambda i, t, name: worker.progress.emit(i, t, name),
+            )
+
+        worker = AsyncWorker(_do_restore, self)
+        worker.progress.connect(self._on_backup_restore_progress)
 
         def _ok(results):
             for line in results:
                 self.backup_log.appendPlainText(line)
             self.restore_button.setEnabled(True)
+            self.log_action(
+                "Restore", detail=f"Dari {zip_path}", status="OK", serial=serial
+            )
             QMessageBox.information(self, "Restore Selesai", "Proses restore selesai.")
 
         def _fail(message):
             self.backup_log.appendPlainText(f"Restore gagal: {message}")
             self.restore_button.setEnabled(True)
+            self.log_action("Restore", detail=message, status="GAGAL", serial=serial)
             QMessageBox.critical(self, "Restore Gagal", message)
 
         worker.succeeded.connect(_ok)
@@ -2938,6 +3088,12 @@ class MainWindow(QMainWindow):
             self.firmware_flash_log.appendPlainText("--- SELESAI ---")
             self.firmware_flash_button.setEnabled(True)
             self.firmware_flash_button.setText("Flash Partition Sekarang")
+            self.log_action(
+                "Flash Partition",
+                detail=f"{partition} <- {image_path}",
+                status="OK",
+                serial=serial,
+            )
             QMessageBox.information(
                 self, "Flash Berhasil", f"Partition '{partition}' berhasil diflash."
             )
@@ -2946,6 +3102,12 @@ class MainWindow(QMainWindow):
             self.firmware_flash_log.appendPlainText(f"ERROR: {message}")
             self.firmware_flash_button.setEnabled(True)
             self.firmware_flash_button.setText("Flash Partition Sekarang")
+            self.log_action(
+                "Flash Partition",
+                detail=f"{partition} <- {image_path}: {message}",
+                status="GAGAL",
+                serial=serial,
+            )
             QMessageBox.critical(self, "Flash Gagal", message)
 
         worker.succeeded.connect(_on_success)

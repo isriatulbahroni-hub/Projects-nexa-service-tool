@@ -123,6 +123,17 @@ def get_devices_with_state() -> dict[str, str]:
     return devices
 
 
+def is_device_connected(serial: str) -> bool:
+    """Cek cepat apakah `serial` masih terdaftar dan authorized di ADB.
+    Dipakai operasi panjang (backup/restore) untuk deteksi device kecabut
+    di tengah proses, supaya bisa berhenti dengan pesan yang jelas
+    daripada terus mencoba semua target tersisa dan timeout satu-satu."""
+    try:
+        return get_devices_with_state().get(serial) == "device"
+    except ADBError:
+        return False
+
+
 def reboot_device(serial: str, mode: str = "system") -> str:
     allowed_modes = {
         "system": (),
