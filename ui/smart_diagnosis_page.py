@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.smart_diagnosis import DiagnosisReport, diagnose
+from core.usb_diagnostics import UsbDiagnosticsReport, collect_usb_diagnostics
 
 
 class SmartDiagnosisPage(QWidget):
@@ -33,6 +34,7 @@ class SmartDiagnosisPage(QWidget):
         super().__init__(parent)
         self.facts_provider = facts_provider
         self.last_report: DiagnosisReport | None = None
+        self.last_usb_report: UsbDiagnosticsReport | None = None
         self._build()
 
     def _build(self) -> None:
@@ -68,6 +70,11 @@ class SmartDiagnosisPage(QWidget):
         self.run_button.setObjectName("actionPrimary")
         self.run_button.clicked.connect(self.run_scan)
         actions.addWidget(self.run_button)
+
+        self.run_usb_button = QPushButton("CHECK USB / ADB")
+        self.run_usb_button.setObjectName("action")
+        self.run_usb_button.clicked.connect(self.run_usb_scan)
+        actions.addWidget(self.run_usb_button)
         actions.addStretch()
         layout.addLayout(actions)
 
@@ -76,6 +83,19 @@ class SmartDiagnosisPage(QWidget):
         self.findings_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.findings_table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.findings_table, 2)
+
+        usb_title = QLabel("USB / CONNECTION DIAGNOSTICS")
+        usb_title.setObjectName("cardTitle")
+        layout.addWidget(usb_title)
+
+        self.usb_status = QLabel("Belum diperiksa")
+        self.usb_status.setObjectName("value")
+        layout.addWidget(self.usb_status)
+
+        self.usb_details = QPlainTextEdit()
+        self.usb_details.setReadOnly(True)
+        self.usb_details.setMaximumHeight(150)
+        layout.addWidget(self.usb_details)
 
         rec_title = QLabel("Rekomendasi Aman")
         rec_title.setObjectName("cardTitle")
@@ -102,4 +122,42 @@ class SmartDiagnosisPage(QWidget):
         self.recommendations.setPlainText(
             "\n".join(f"• {item}" for item in report.recommendations)
         )
+        return report
+
+    def run_usb_scan(self) -> UsbDiagnosticsReport:
+        """Run read-only USB/ADB detection and render the result."""
+        report = collect_usb_diagnostics()
+        self.last_usb_report = report
+
+        usb_count = len(report.usb_devices)
+        serial_count = len(report.serial_ports)
+        adb_count = len(report.adb_devices)
+        samsung = "Detected" if report.samsung_usb_detected else "Not detected"
+
+        self.usb_status.setText(
+            f"USB devices: {usb_count} | Serial/COM: {serial_count} | "
+            f"ADB devices: {adb_count} | Samsung USB: {samsung}"
+        )
+
+        lines = [
+            f"Windows PnP: {'available' if report.pnp_available else 'unavailable'}",
+            f"ADB executable: {'available' if report.adb_available else 'not found'}",
+            f"PyUSB backend: {report.pyusb_backend}",
+        ]
+        for device in report.usb_devices[:12]:
+            ids = ""
+            if device.vendor_id or device.product_id:
+                ids = f" [{device.vendor_id}:{device.product_id}]"
+            lines.append(f"USB: {device.friendly_name}{ids}")
+        for port in report.serial_ports[:8]:
+            lines.append(f"PORT: {port.name} - {port.description}")
+        for device in report.adb_devices[:8]:
+            lines.append(f"ADB: {device.get('serial', '?')} - {device.get('state', '?')}")
+
+        if not report.usb_devices:
+            lines.append("Diagnosis: Windows is not currently enumerating a USB/modem/port device.")
+        elif not report.adb_devices:
+            lines.append("Diagnosis: USB is visible, but no ADB device is currently available.")
+
+        self.usb_details.setPlainText("\n".join(lines))
         return report
