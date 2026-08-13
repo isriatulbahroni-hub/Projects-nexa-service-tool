@@ -760,6 +760,21 @@ class MainWindow(QMainWindow):
 
         self.pages.setCurrentWidget(self.page_widgets[key])
 
+        # BUG: seluruh QStackedWidget (semua halaman) dibungkus SATU
+        # QScrollArea yang sama (self.content_scroll). Kalau user scroll ke
+        # bawah di halaman yang panjang (mis. Dashboard) lalu pindah ke
+        # halaman yang lebih pendek (mis. Security Check, Screen Mirror,
+        # Firmware Flash), posisi scroll TIDAK ikut reset - jadi bagian
+        # atas halaman baru itu ketutup/keluar dari viewport, kelihatan
+        # seperti "ruang kosong besar" padahal cuma halamannya nyangkut di
+        # posisi scroll halaman sebelumnya. Selalu reset ke atas setiap
+        # ganti halaman. Pakai singleShot(0, ...) supaya reset-nya jalan
+        # SETELAH Qt selesai menghitung ulang layout halaman baru -
+        # kalau di-set langsung, kadang keburu ketimpa ulang oleh proses
+        # resize internal QStackedWidget/QScrollArea.
+        if hasattr(self, "content_scroll"):
+            QTimer.singleShot(0, lambda: self.content_scroll.verticalScrollBar().setValue(0))
+
         if key == "history":
             self.refresh_history_table()
         elif key == "diagnostics":
