@@ -803,6 +803,49 @@ class MainWindow(QMainWindow):
     # Dashboard Page
     # ------------------------------------------------------------------
 
+    def _page_header(self, title_text: str, desc_text: str) -> QVBoxLayout:
+        """Header standar (judul besar + deskripsi abu-abu) dipakai di
+        hampir semua halaman - disatukan di sini supaya konsisten dan
+        tidak perlu diulang manual di tiap create_*_page()."""
+        header = QVBoxLayout()
+        title = QLabel(title_text)
+        title.setObjectName("contentTitle")
+        desc = QLabel(desc_text)
+        desc.setObjectName("muted")
+        desc.setWordWrap(True)
+        header.addWidget(title)
+        header.addWidget(desc)
+        return header
+
+    def _card_panel(
+        self, title_text: str, refresh_handler=None, refresh_label: str = "🔄 Refresh"
+    ) -> tuple[QFrame, QVBoxLayout]:
+        """Bikin satu panel bergaya '#card' dengan judul (dan tombol
+        refresh opsional di kanan judul) - dipakai konsisten di semua
+        halaman supaya visualnya seragam dengan Dashboard, bukan cuma
+        label/tombol polos langsung di atas background gelap."""
+        card = QFrame()
+        card.setObjectName("card")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(22, 18, 22, 18)
+        card_layout.setSpacing(10)
+
+        if title_text:
+            head_row = QHBoxLayout()
+            head = QLabel(title_text)
+            head.setObjectName("cardTitle")
+            head_row.addWidget(head, 1)
+
+            if refresh_handler is not None:
+                refresh_btn = QPushButton(refresh_label)
+                refresh_btn.setObjectName("action")
+                refresh_btn.clicked.connect(refresh_handler)
+                head_row.addWidget(refresh_btn)
+
+            card_layout.addLayout(head_row)
+
+        return card, card_layout
+
     def create_dashboard_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -1316,12 +1359,9 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(32, 28, 32, 28)
         layout.setSpacing(16)
 
-        title = QLabel("Hardware Test")
-        title.setObjectName("contentTitle")
-        desc = QLabel("Safe, read-only checks for the connected Android device.")
-        desc.setObjectName("muted")
-        layout.addWidget(title)
-        layout.addWidget(desc)
+        layout.addLayout(self._page_header(
+            "Hardware Test", "Safe, read-only checks for the connected Android device."
+        ))
 
         summary = QFrame()
         summary.setObjectName("card")
@@ -1331,33 +1371,42 @@ class MainWindow(QMainWindow):
         self.hardware_score.setObjectName("scoreBig")
         self.hardware_summary = QLabel("Run a full hardware test to collect a report.")
         self.hardware_summary.setObjectName("value")
+        self.hardware_summary.setWordWrap(True)
         summary_layout.addWidget(self.hardware_score)
         summary_layout.addWidget(self.hardware_summary, 1)
         layout.addWidget(summary)
 
+        card, card_layout = self._card_panel("Hasil Pengujian")
+
         actions = QHBoxLayout()
-        self.hardware_run_button = QPushButton("RUN FULL HARDWARE TEST")
+        self.hardware_run_button = QPushButton("🧪 RUN FULL HARDWARE TEST")
         self.hardware_run_button.setObjectName("actionPrimary")
         self.hardware_run_button.clicked.connect(self.run_full_hardware_test)
-        self.hardware_refresh_button = QPushButton("Refresh")
+        self.hardware_refresh_button = QPushButton("🔄 Refresh")
         self.hardware_refresh_button.setObjectName("action")
         self.hardware_refresh_button.clicked.connect(self.refresh_hardware_test_status)
         actions.addWidget(self.hardware_run_button)
         actions.addWidget(self.hardware_refresh_button)
         actions.addStretch()
-        layout.addLayout(actions)
+        card_layout.addLayout(actions)
 
         self.hardware_table = QTableWidget(0, 4)
         self.hardware_table.setHorizontalHeaderLabels(["Check", "Status", "Value", "Detail"])
         self.hardware_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.hardware_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.hardware_table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.hardware_table, 1)
+        self.hardware_table.setMinimumHeight(320)
+        card_layout.addWidget(self.hardware_table)
 
-        warning = QLabel("Read-only diagnostics: camera, speaker, microphone, sensors, fingerprint and touchscreen still require physical interaction tests.")
+        warning = QLabel(
+            "Read-only diagnostics: camera, speaker, microphone, sensors, "
+            "fingerprint and touchscreen still require physical interaction tests."
+        )
         warning.setObjectName("muted")
         warning.setWordWrap(True)
-        layout.addWidget(warning)
+        card_layout.addWidget(warning)
+
+        layout.addWidget(card)
         return page
 
     def refresh_hardware_test_status(self):
@@ -1412,61 +1461,43 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(32, 28, 32, 28)
-        layout.setSpacing(18)
+        layout.setSpacing(16)
 
-        title = QLabel("Device")
-        title.setObjectName("contentTitle")
+        layout.addLayout(self._page_header(
+            "Device", "Informasi perangkat Android yang sedang terhubung."
+        ))
 
-        desc = QLabel("Informasi perangkat Android yang sedang terhubung.")
-        desc.setObjectName("muted")
-
-        layout.addWidget(title)
-        layout.addWidget(desc)
-
-        card = QFrame()
-        card.setObjectName("card")
-
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(22, 20, 22, 20)
-        card_layout.setSpacing(9)
+        card, card_layout = self._card_panel("Status Device")
 
         self.device_status = QLabel("Checking...")
         self.device_status.setObjectName("status")
 
         self.device_info = QLabel("")
         self.device_info.setObjectName("value")
+        self.device_info.setWordWrap(True)
 
         card_layout.addWidget(self.device_status)
         card_layout.addWidget(self.device_info)
 
         layout.addWidget(card)
 
-        actions = QFrame()
-        actions.setObjectName("card")
+        actions, actions_layout = self._card_panel("Device Actions")
 
-        actions_layout = QVBoxLayout(actions)
-        actions_layout.setContentsMargins(22, 20, 22, 20)
-        actions_layout.setSpacing(10)
-
-        actions_title = QLabel("Device Actions")
-        actions_title.setObjectName("cardTitle")
-
-        self.refresh_button = QPushButton("Refresh Device")
+        self.refresh_button = QPushButton("🔄 Refresh Device")
         self.refresh_button.setObjectName("action")
 
-        self.reboot_button = QPushButton("Reboot System")
+        self.reboot_button = QPushButton("🔁 Reboot System")
         self.reboot_button.setObjectName("action")
         self.reboot_button.setEnabled(False)
 
-        self.recovery_button = QPushButton("Reboot Recovery")
+        self.recovery_button = QPushButton("🛠 Reboot Recovery")
         self.recovery_button.setObjectName("action")
         self.recovery_button.setEnabled(False)
 
-        self.bootloader_button = QPushButton("Reboot Bootloader")
+        self.bootloader_button = QPushButton("⚠ Reboot Bootloader")
         self.bootloader_button.setObjectName("actionDanger")
         self.bootloader_button.setEnabled(False)
 
-        actions_layout.addWidget(actions_title)
         actions_layout.addWidget(self.refresh_button)
         actions_layout.addWidget(self.reboot_button)
         actions_layout.addWidget(self.recovery_button)
@@ -1521,45 +1552,29 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(32, 28, 32, 28)
-        layout.setSpacing(18)
+        layout.setSpacing(16)
 
-        title = QLabel("Device Diagnostics")
-        title.setObjectName("contentTitle")
-
-        desc = QLabel(
+        layout.addLayout(self._page_header(
+            "Device Diagnostics",
             "Komprehensif diagnostics perangkat: ADB, boot, battery, storage, software, dan network."
-        )
-        desc.setObjectName("muted")
-
-        layout.addWidget(title)
-        layout.addWidget(desc)
+        ))
 
         row = QHBoxLayout()
         row.setSpacing(16)
 
-        info_card = QFrame()
-        info_card.setObjectName("card")
-        info_layout = QVBoxLayout(info_card)
-        info_layout.setContentsMargins(22, 20, 22, 20)
-        info_layout.setSpacing(9)
+        info_card, info_layout = self._card_panel("Status Device")
 
         self.diag_status = QLabel("Checking...")
         self.diag_status.setObjectName("status")
 
         self.diag_info = QLabel("")
         self.diag_info.setObjectName("value")
+        self.diag_info.setWordWrap(True)
 
         info_layout.addWidget(self.diag_status)
         info_layout.addWidget(self.diag_info)
 
-        score_card = QFrame()
-        score_card.setObjectName("card")
-        score_layout = QVBoxLayout(score_card)
-        score_layout.setContentsMargins(22, 20, 22, 20)
-        score_layout.setSpacing(8)
-
-        score_title = QLabel("Health Score")
-        score_title.setObjectName("cardTitle")
+        score_card, score_layout = self._card_panel("Health Score")
 
         self.diag_score_value = QLabel("--")
         self.diag_score_value.setObjectName("scoreBig")
@@ -1573,7 +1588,6 @@ class MainWindow(QMainWindow):
         self.diag_recommendations.setReadOnly(True)
         self.diag_recommendations.setFixedHeight(140)
 
-        score_layout.addWidget(score_title)
         score_layout.addWidget(self.diag_score_value)
         score_layout.addWidget(self.diag_score_bar)
         score_layout.addWidget(QLabel("Rekomendasi:"))
@@ -1584,6 +1598,8 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(row)
 
+        table_card, table_layout = self._card_panel("Detail Pemeriksaan")
+
         self.diag_table = QTableWidget(0, 5)
         self.diag_table.setHorizontalHeaderLabels(
             ["Category", "Check", "Status", "Value", "Detail"]
@@ -1592,20 +1608,20 @@ class MainWindow(QMainWindow):
         self.diag_table.setSelectionMode(QTableWidget.NoSelection)
         self.diag_table.horizontalHeader().setStretchLastSection(True)
         self.diag_table.setMinimumHeight(260)
-        layout.addWidget(self.diag_table)
+        table_layout.addWidget(self.diag_table)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
 
-        self.diag_refresh_button = QPushButton("Refresh Diagnostics")
+        self.diag_refresh_button = QPushButton("🔄 Refresh Diagnostics")
         self.diag_refresh_button.setObjectName("action")
         self.diag_refresh_button.clicked.connect(self.refresh_diagnostics)
 
-        self.diag_save_button = QPushButton("Simpan ke Riwayat")
+        self.diag_save_button = QPushButton("💾 Simpan ke Riwayat")
         self.diag_save_button.setObjectName("action")
         self.diag_save_button.clicked.connect(self.save_diagnostics_to_history)
 
-        self.diag_export_button = QPushButton("Export PDF")
+        self.diag_export_button = QPushButton("🖨 Export PDF")
         self.diag_export_button.setObjectName("actionPrimary")
         self.diag_export_button.clicked.connect(self.export_pdf_report)
 
@@ -1613,7 +1629,8 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self.diag_save_button)
         btn_row.addWidget(self.diag_export_button)
 
-        layout.addLayout(btn_row)
+        table_layout.addLayout(btn_row)
+        layout.addWidget(table_card)
         layout.addStretch()
 
         return page
@@ -1784,30 +1801,27 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(32, 28, 32, 28)
-        layout.setSpacing(14)
+        layout.setSpacing(16)
 
-        title = QLabel("Live Logs")
-        title.setObjectName("contentTitle")
+        layout.addLayout(self._page_header(
+            "Live Logs", "Streaming logcat real-time dari device yang aktif."
+        ))
 
-        desc = QLabel("Streaming logcat real-time dari device yang aktif.")
-        desc.setObjectName("muted")
-
-        layout.addWidget(title)
-        layout.addWidget(desc)
+        card, card_layout = self._card_panel("Logcat Controller")
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
 
-        self.log_start_button = QPushButton("Start Logcat")
+        self.log_start_button = QPushButton("▶ Start Logcat")
         self.log_start_button.setObjectName("actionPrimary")
         self.log_start_button.clicked.connect(self.start_logcat)
 
-        self.log_stop_button = QPushButton("Stop")
+        self.log_stop_button = QPushButton("⏹ Stop")
         self.log_stop_button.setObjectName("actionDanger")
         self.log_stop_button.clicked.connect(self.stop_logcat)
         self.log_stop_button.setEnabled(False)
 
-        self.log_clear_button = QPushButton("Clear")
+        self.log_clear_button = QPushButton("🧹 Clear")
         self.log_clear_button.setObjectName("action")
         self.log_clear_button.clicked.connect(lambda: self.log_console.clear())
 
@@ -1816,14 +1830,16 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self.log_clear_button)
         btn_row.addStretch()
 
-        layout.addLayout(btn_row)
+        card_layout.addLayout(btn_row)
 
         self.log_console = QPlainTextEdit()
         self.log_console.setObjectName("logConsole")
         self.log_console.setReadOnly(True)
         self.log_console.setMaximumBlockCount(2000)
+        self.log_console.setMinimumHeight(420)
 
-        layout.addWidget(self.log_console)
+        card_layout.addWidget(self.log_console)
+        layout.addWidget(card)
 
         return page
 
@@ -1869,27 +1885,15 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(32, 28, 32, 28)
-        layout.setSpacing(14)
+        layout.setSpacing(16)
 
-        title = QLabel("Service History")
-        title.setObjectName("contentTitle")
+        layout.addLayout(self._page_header(
+            "Service History", "Riwayat diagnostics yang pernah disimpan per device."
+        ))
 
-        desc = QLabel("Riwayat diagnostics yang pernah disimpan per device.")
-        desc.setObjectName("muted")
-
-        layout.addWidget(title)
-        layout.addWidget(desc)
-
-        btn_row = QHBoxLayout()
-
-        self.history_refresh_button = QPushButton("Refresh Riwayat")
-        self.history_refresh_button.setObjectName("action")
-        self.history_refresh_button.clicked.connect(self.refresh_history_table)
-
-        btn_row.addWidget(self.history_refresh_button)
-        btn_row.addStretch()
-
-        layout.addLayout(btn_row)
+        history_card, history_layout = self._card_panel(
+            "Riwayat Diagnostics", refresh_handler=self.refresh_history_table
+        )
 
         self.history_table = QTableWidget(0, 7)
         self.history_table.setHorizontalHeaderLabels(
@@ -1905,8 +1909,10 @@ class MainWindow(QMainWindow):
         )
         self.history_table.horizontalHeader().setStretchLastSection(True)
         self.history_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.history_table.setMinimumHeight(220)
 
-        layout.addWidget(self.history_table)
+        history_layout.addWidget(self.history_table)
+        layout.addWidget(history_card)
 
         # -----------------------------------------------------------
         # Activity Log / Audit Trail - catatan tindakan berisiko
@@ -1914,15 +1920,13 @@ class MainWindow(QMainWindow):
         # reboot recovery/bootloader) yang sebelumnya tidak tercatat
         # sama sekali. Penting untuk akuntabilitas ke pelanggan.
         # -----------------------------------------------------------
-        audit_title = QLabel("Activity Log (Audit Trail)")
-        audit_title.setObjectName("cardTitle")
-        layout.addWidget(audit_title)
+        audit_card, audit_layout = self._card_panel("Activity Log (Audit Trail)")
 
         audit_desc = QLabel(
             "Catatan semua tindakan berisiko yang dilakukan lewat service tool ini."
         )
         audit_desc.setObjectName("muted")
-        layout.addWidget(audit_desc)
+        audit_layout.addWidget(audit_desc)
 
         # Filter serial - dipakai untuk lihat "timeline" gabungan
         # (diagnostics history + audit trail) untuk 1 device/case tertentu,
@@ -1940,7 +1944,7 @@ class MainWindow(QMainWindow):
         filter_row.addWidget(self.history_filter_serial, 1)
         filter_row.addWidget(filter_button)
         filter_row.addWidget(clear_filter_button)
-        layout.addLayout(filter_row)
+        audit_layout.addLayout(filter_row)
 
         self.action_log_table = QTableWidget(0, 6)
         self.action_log_table.setHorizontalHeaderLabels(
@@ -1950,7 +1954,9 @@ class MainWindow(QMainWindow):
         self.action_log_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.action_log_table.setFixedHeight(220)
 
-        layout.addWidget(self.action_log_table)
+        audit_layout.addWidget(self.action_log_table)
+        layout.addWidget(audit_card)
+        layout.addStretch()
 
         return page
 
@@ -2037,54 +2043,38 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(32, 28, 32, 28)
-        layout.setSpacing(14)
+        layout.setSpacing(16)
 
-        title = QLabel("Security Check")
-        title.setObjectName("contentTitle")
+        layout.addLayout(self._page_header(
+            "Security Check", "Auto-detect root, status bootloader, dan patch keamanan."
+        ))
 
-        desc = QLabel("Auto-detect root, status bootloader, dan patch keamanan.")
-        desc.setObjectName("muted")
-
-        layout.addWidget(title)
-        layout.addWidget(desc)
-
-        card = QFrame()
-        card.setObjectName("card")
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(22, 20, 22, 20)
-        card_layout.setSpacing(9)
+        card, card_layout = self._card_panel("Status Keamanan")
 
         self.security_status = QLabel("Checking...")
         self.security_status.setObjectName("status")
 
         self.security_info = QLabel("")
         self.security_info.setObjectName("value")
+        self.security_info.setWordWrap(True)
 
         card_layout.addWidget(self.security_status)
         card_layout.addWidget(self.security_info)
 
         layout.addWidget(card)
 
-        warn_card = QFrame()
-        warn_card.setObjectName("card")
-        warn_layout = QVBoxLayout(warn_card)
-        warn_layout.setContentsMargins(22, 20, 22, 20)
-        warn_layout.setSpacing(8)
-
-        warn_title = QLabel("Peringatan & Rekomendasi")
-        warn_title.setObjectName("cardTitle")
+        warn_card, warn_layout = self._card_panel("Peringatan & Rekomendasi")
 
         self.security_warnings = QTextEdit()
         self.security_warnings.setObjectName("value")
         self.security_warnings.setReadOnly(True)
         self.security_warnings.setFixedHeight(150)
 
-        warn_layout.addWidget(warn_title)
         warn_layout.addWidget(self.security_warnings)
 
         layout.addWidget(warn_card)
 
-        self.security_refresh_button = QPushButton("Jalankan Security Check")
+        self.security_refresh_button = QPushButton("🛡 Jalankan Security Check")
         self.security_refresh_button.setObjectName("actionPrimary")
         self.security_refresh_button.clicked.connect(self.refresh_security_check)
 
@@ -2142,25 +2132,22 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(32, 28, 32, 28)
-        layout.setSpacing(14)
+        layout.setSpacing(16)
 
-        title = QLabel("App Manager")
-        title.setObjectName("contentTitle")
+        layout.addLayout(self._page_header(
+            "App Manager", "Kelola aplikasi terinstall di device: install, uninstall, force-stop."
+        ))
 
-        desc = QLabel("Kelola aplikasi terinstall di device: install, uninstall, force-stop.")
-        desc.setObjectName("muted")
-
-        layout.addWidget(title)
-        layout.addWidget(desc)
+        card, card_layout = self._card_panel("Daftar Aplikasi")
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
 
-        self.apps_refresh_button = QPushButton("Refresh Daftar Apps")
+        self.apps_refresh_button = QPushButton("🔄 Refresh Daftar Apps")
         self.apps_refresh_button.setObjectName("action")
         self.apps_refresh_button.clicked.connect(self.refresh_apps_list)
 
-        self.apps_install_button = QPushButton("Install APK...")
+        self.apps_install_button = QPushButton("⬇ Install APK...")
         self.apps_install_button.setObjectName("actionPrimary")
         self.apps_install_button.clicked.connect(self.install_apk_dialog)
 
@@ -2168,15 +2155,16 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self.apps_install_button)
         btn_row.addStretch()
 
-        layout.addLayout(btn_row)
+        card_layout.addLayout(btn_row)
 
         self.apps_list = QListWidget()
-        layout.addWidget(self.apps_list)
+        self.apps_list.setMinimumHeight(340)
+        card_layout.addWidget(self.apps_list)
 
         action_row = QHBoxLayout()
         action_row.setSpacing(10)
 
-        self.apps_stop_button = QPushButton("Force Stop")
+        self.apps_stop_button = QPushButton("⏹ Force Stop")
         self.apps_stop_button.setObjectName("action")
         self.apps_stop_button.clicked.connect(self.force_stop_selected_app)
 
@@ -2188,11 +2176,11 @@ class MainWindow(QMainWindow):
         )
         self.apps_repair_button.clicked.connect(self.repair_trim_caches)
 
-        self.apps_clear_button = QPushButton("Clear Data")
+        self.apps_clear_button = QPushButton("🗑 Clear Data")
         self.apps_clear_button.setObjectName("action")
         self.apps_clear_button.clicked.connect(self.clear_data_selected_app)
 
-        self.apps_uninstall_button = QPushButton("Uninstall")
+        self.apps_uninstall_button = QPushButton("❌ Uninstall")
         self.apps_uninstall_button.setObjectName("actionDanger")
         self.apps_uninstall_button.clicked.connect(self.uninstall_selected_app)
 
@@ -2201,7 +2189,8 @@ class MainWindow(QMainWindow):
         action_row.addWidget(self.apps_clear_button)
         action_row.addWidget(self.apps_uninstall_button)
 
-        layout.addLayout(action_row)
+        card_layout.addLayout(action_row)
+        layout.addWidget(card)
 
         return page
 
@@ -2409,16 +2398,13 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(32, 28, 32, 28)
-        layout.setSpacing(14)
+        layout.setSpacing(16)
 
-        title = QLabel("File Explorer")
-        title.setObjectName("contentTitle")
+        layout.addLayout(self._page_header(
+            "File Explorer", "Browse penyimpanan device, push/pull file via ADB."
+        ))
 
-        desc = QLabel("Browse penyimpanan device, push/pull file via ADB.")
-        desc.setObjectName("muted")
-
-        layout.addWidget(title)
-        layout.addWidget(desc)
+        card, card_layout = self._card_panel("Penjelajah File")
 
         path_row = QHBoxLayout()
         path_row.setSpacing(8)
@@ -2426,11 +2412,11 @@ class MainWindow(QMainWindow):
         self.files_path_input = QLineEdit(self.file_explorer_path)
         self.files_path_input.returnPressed.connect(self.navigate_to_path_input)
 
-        self.files_up_button = QPushButton("Up")
+        self.files_up_button = QPushButton("⬆ Up")
         self.files_up_button.setObjectName("action")
         self.files_up_button.clicked.connect(self.navigate_up)
 
-        self.files_go_button = QPushButton("Go")
+        self.files_go_button = QPushButton("➜ Go")
         self.files_go_button.setObjectName("action")
         self.files_go_button.clicked.connect(self.navigate_to_path_input)
 
@@ -2438,24 +2424,25 @@ class MainWindow(QMainWindow):
         path_row.addWidget(self.files_up_button)
         path_row.addWidget(self.files_go_button)
 
-        layout.addLayout(path_row)
+        card_layout.addLayout(path_row)
 
         self.files_list = QListWidget()
+        self.files_list.setMinimumHeight(340)
         self.files_list.itemDoubleClicked.connect(self.on_file_double_clicked)
-        layout.addWidget(self.files_list)
+        card_layout.addWidget(self.files_list)
 
         action_row = QHBoxLayout()
         action_row.setSpacing(10)
 
-        self.files_pull_button = QPushButton("Pull ke Laptop")
+        self.files_pull_button = QPushButton("⬇ Pull ke Laptop")
         self.files_pull_button.setObjectName("action")
         self.files_pull_button.clicked.connect(self.pull_selected_file)
 
-        self.files_push_button = QPushButton("Push dari Laptop")
+        self.files_push_button = QPushButton("⬆ Push dari Laptop")
         self.files_push_button.setObjectName("action")
         self.files_push_button.clicked.connect(self.push_file_dialog)
 
-        self.files_delete_button = QPushButton("Hapus")
+        self.files_delete_button = QPushButton("🗑 Hapus")
         self.files_delete_button.setObjectName("actionDanger")
         self.files_delete_button.clicked.connect(self.delete_selected_file)
 
@@ -2463,7 +2450,8 @@ class MainWindow(QMainWindow):
         action_row.addWidget(self.files_push_button)
         action_row.addWidget(self.files_delete_button)
 
-        layout.addLayout(action_row)
+        card_layout.addLayout(action_row)
+        layout.addWidget(card)
 
         return page
 
@@ -2617,38 +2605,33 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(32, 28, 32, 28)
-        layout.setSpacing(14)
+        layout.setSpacing(16)
 
-        title = QLabel("Screen Mirror")
-        title.setObjectName("contentTitle")
-
-        desc = QLabel(
+        layout.addLayout(self._page_header(
+            "Screen Mirror",
             "Preview layar device (refresh berkala) - klik gambar untuk tap, "
             "berbasis ADB tanpa dependency tambahan."
-        )
-        desc.setObjectName("muted")
-        desc.setWordWrap(True)
+        ))
 
-        layout.addWidget(title)
-        layout.addWidget(desc)
+        card, card_layout = self._card_panel("Live Preview")
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
 
-        self.mirror_start_button = QPushButton("Start Mirror")
+        self.mirror_start_button = QPushButton("▶ Start Mirror")
         self.mirror_start_button.setObjectName("actionPrimary")
         self.mirror_start_button.clicked.connect(self.start_mirror)
 
-        self.mirror_stop_button = QPushButton("Stop")
+        self.mirror_stop_button = QPushButton("⏹ Stop")
         self.mirror_stop_button.setObjectName("actionDanger")
         self.mirror_stop_button.clicked.connect(self.stop_mirror)
         self.mirror_stop_button.setEnabled(False)
 
-        self.mirror_home_button = QPushButton("Home")
+        self.mirror_home_button = QPushButton("⌂ Home")
         self.mirror_home_button.setObjectName("action")
         self.mirror_home_button.clicked.connect(lambda: self._send_key_safe("KEYCODE_HOME"))
 
-        self.mirror_back_button = QPushButton("Back")
+        self.mirror_back_button = QPushButton("◀ Back")
         self.mirror_back_button.setObjectName("action")
         self.mirror_back_button.clicked.connect(lambda: self._send_key_safe("KEYCODE_BACK"))
 
@@ -2658,18 +2641,19 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self.mirror_back_button)
         btn_row.addStretch()
 
-        layout.addLayout(btn_row)
+        card_layout.addLayout(btn_row)
 
         self.mirror_view = QLabel("Klik Start Mirror untuk mulai preview layar device.")
         self.mirror_view.setObjectName("value")
         self.mirror_view.setAlignment(Qt.AlignCenter)
-        self.mirror_view.setMinimumHeight(400)
+        self.mirror_view.setMinimumHeight(420)
         self.mirror_view.setStyleSheet(
             "background:#0a0b0e; border:1px solid #22262f; border-radius:10px;"
         )
         self.mirror_view.mousePressEvent = self._on_mirror_clicked
 
-        layout.addWidget(self.mirror_view)
+        card_layout.addWidget(self.mirror_view)
+        layout.addWidget(card)
 
         return page
 
@@ -2757,29 +2741,24 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(32, 28, 32, 28)
-        layout.setSpacing(14)
+        layout.setSpacing(16)
 
-        title = QLabel("Backup & Restore")
-        title.setObjectName("contentTitle")
-
-        desc = QLabel(
+        layout.addLayout(self._page_header(
+            "Backup & Restore",
             "Backup folder penting (DCIM, Download, Pictures, WhatsApp) ke file ZIP, "
             "dan restore kembali ke device."
-        )
-        desc.setObjectName("muted")
-        desc.setWordWrap(True)
+        ))
 
-        layout.addWidget(title)
-        layout.addWidget(desc)
+        card, card_layout = self._card_panel("Backup Device")
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
 
-        self.backup_button = QPushButton("Backup Sekarang")
+        self.backup_button = QPushButton("☁ Backup Sekarang")
         self.backup_button.setObjectName("actionPrimary")
         self.backup_button.clicked.connect(self.run_backup)
 
-        self.restore_button = QPushButton("Restore dari ZIP...")
+        self.restore_button = QPushButton("⤴ Restore dari ZIP...")
         self.restore_button.setObjectName("action")
         self.restore_button.clicked.connect(self.run_restore)
 
@@ -2787,19 +2766,21 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self.restore_button)
         btn_row.addStretch()
 
-        layout.addLayout(btn_row)
+        card_layout.addLayout(btn_row)
 
         self.backup_restore_progress = QProgressBar()
         self.backup_restore_progress.setRange(0, 1)
         self.backup_restore_progress.setValue(0)
         self.backup_restore_progress.setFormat("Belum ada proses berjalan")
-        layout.addWidget(self.backup_restore_progress)
+        card_layout.addWidget(self.backup_restore_progress)
 
         self.backup_log = QPlainTextEdit()
         self.backup_log.setObjectName("logConsole")
         self.backup_log.setReadOnly(True)
+        self.backup_log.setMinimumHeight(320)
 
-        layout.addWidget(self.backup_log)
+        card_layout.addWidget(self.backup_log)
+        layout.addWidget(card)
 
         return page
 
@@ -2987,22 +2968,13 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(32, 28, 32, 28)
-        layout.setSpacing(14)
+        layout.setSpacing(16)
 
-        title = QLabel("Network & IMEI")
-        title.setObjectName("contentTitle")
+        layout.addLayout(self._page_header(
+            "Network & IMEI", "Informasi IMEI, status WiFi/data seluler, IP, dan operator."
+        ))
 
-        desc = QLabel("Informasi IMEI, status WiFi/data seluler, IP, dan operator.")
-        desc.setObjectName("muted")
-
-        layout.addWidget(title)
-        layout.addWidget(desc)
-
-        card = QFrame()
-        card.setObjectName("card")
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(22, 20, 22, 20)
-        card_layout.setSpacing(9)
+        card, card_layout = self._card_panel("Status Jaringan")
 
         self.network_status = QLabel("Checking...")
         self.network_status.setObjectName("status")
@@ -3016,7 +2988,7 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(card)
 
-        self.network_refresh_button = QPushButton("Refresh Network Info")
+        self.network_refresh_button = QPushButton("🔄 Refresh Network Info")
         self.network_refresh_button.setObjectName("actionPrimary")
         self.network_refresh_button.clicked.connect(self.refresh_network_info)
 
@@ -3066,67 +3038,46 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(32, 28, 32, 28)
-        layout.setSpacing(14)
+        layout.setSpacing(16)
 
-        title = QLabel("Firmware & Flash")
-        title.setObjectName("contentTitle")
-
-        desc = QLabel(
+        layout.addLayout(self._page_header(
+            "Firmware & Flash",
             "Info build firmware saat ini, dan flash partition via Fastboot. "
             "Fitur flashing hanya aktif saat device dalam mode Bootloader."
+        ))
+
+        card, card_layout = self._card_panel(
+            "Build Info", refresh_handler=lambda: self.refresh_firmware_info(),
+            refresh_label="🔄 Refresh Build Info",
         )
-        desc.setObjectName("muted")
-        desc.setWordWrap(True)
-
-        layout.addWidget(title)
-        layout.addWidget(desc)
-
-        card = QFrame()
-        card.setObjectName("card")
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(22, 20, 22, 20)
-        card_layout.setSpacing(9)
 
         self.firmware_status = QLabel("Checking...")
         self.firmware_status.setObjectName("status")
 
         self.firmware_info_label = QLabel("")
         self.firmware_info_label.setObjectName("value")
+        self.firmware_info_label.setWordWrap(True)
 
         card_layout.addWidget(self.firmware_status)
         card_layout.addWidget(self.firmware_info_label)
 
         layout.addWidget(card)
 
-        self.firmware_refresh_button = QPushButton("Refresh Build Info")
-        self.firmware_refresh_button.setObjectName("action")
-        self.firmware_refresh_button.clicked.connect(self.refresh_firmware_info)
-        layout.addWidget(self.firmware_refresh_button)
-
         # --- Fastboot Flash Section ---
-        flash_card = QFrame()
-        flash_card.setObjectName("card")
-        flash_layout = QVBoxLayout(flash_card)
-        flash_layout.setContentsMargins(22, 20, 22, 20)
-        flash_layout.setSpacing(10)
-
-        flash_title = QLabel("Flash Partition (Fastboot Mode)")
-        flash_title.setObjectName("cardTitle")
+        flash_card, flash_layout = self._card_panel("Flash Partition (Fastboot Mode)")
 
         flash_warning = QLabel(
-            "PERINGATAN: Flash partition yang salah dapat menyebabkan device "
+            "⚠ PERINGATAN: Flash partition yang salah dapat menyebabkan device "
             "bootloop atau mati total (bricked). Pastikan file image sesuai "
             "dengan model device dan partition target."
         )
         flash_warning.setObjectName("value")
         flash_warning.setWordWrap(True)
         flash_warning.setStyleSheet("color:#ff6b6b;")
-
-        flash_layout.addWidget(flash_title)
         flash_layout.addWidget(flash_warning)
 
         self.firmware_reboot_bootloader_button = QPushButton(
-            "Reboot ke Bootloader"
+            "🔁 Reboot ke Bootloader"
         )
         self.firmware_reboot_bootloader_button.setObjectName("action")
         self.firmware_reboot_bootloader_button.clicked.connect(
@@ -3141,7 +3092,7 @@ class MainWindow(QMainWindow):
         self.firmware_partition_combo.addItems(COMMON_PARTITIONS)
         self.firmware_partition_combo.setObjectName("deviceSelector")
 
-        self.firmware_select_image_button = QPushButton("Pilih File Image...")
+        self.firmware_select_image_button = QPushButton("📁 Pilih File Image...")
         self.firmware_select_image_button.setObjectName("action")
         self.firmware_select_image_button.clicked.connect(self.select_firmware_image)
 
@@ -3155,7 +3106,7 @@ class MainWindow(QMainWindow):
         self.firmware_image_path_label.setWordWrap(True)
         flash_layout.addWidget(self.firmware_image_path_label)
 
-        self.firmware_flash_button = QPushButton("Flash Partition Sekarang")
+        self.firmware_flash_button = QPushButton("⚡ Flash Partition Sekarang")
         self.firmware_flash_button.setObjectName("actionDanger")
         self.firmware_flash_button.clicked.connect(self.run_flash_partition)
         flash_layout.addWidget(self.firmware_flash_button)
@@ -3377,24 +3328,13 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(32, 28, 32, 28)
-        layout.setSpacing(14)
+        layout.setSpacing(16)
 
-        title = QLabel("Service Cases")
-        title.setObjectName("contentTitle")
-        desc = QLabel("Catat & lacak setiap job servis dari masuk sampai selesai.")
-        desc.setObjectName("muted")
-        layout.addWidget(title)
-        layout.addWidget(desc)
+        layout.addLayout(self._page_header(
+            "Service Cases", "Catat & lacak setiap job servis dari masuk sampai selesai."
+        ))
 
-        form_card = QFrame()
-        form_card.setObjectName("card")
-        form_layout = QVBoxLayout(form_card)
-        form_layout.setContentsMargins(20, 16, 20, 16)
-        form_layout.setSpacing(8)
-
-        form_title = QLabel("Case Baru")
-        form_title.setObjectName("cardTitle")
-        form_layout.addWidget(form_title)
+        form_card, form_layout = self._card_panel("Case Baru")
 
         self.case_customer_name = QLineEdit()
         self.case_customer_name.setPlaceholderText("Nama customer *")
@@ -3418,26 +3358,30 @@ class MainWindow(QMainWindow):
         self.case_use_current_device.setWordWrap(True)
         form_layout.addWidget(self.case_use_current_device)
 
-        self.case_save_button = QPushButton("Simpan Case Baru")
+        self.case_save_button = QPushButton("💾 Simpan Case Baru")
         self.case_save_button.setObjectName("actionPrimary")
         self.case_save_button.clicked.connect(self.create_new_case)
         form_layout.addWidget(self.case_save_button)
 
         layout.addWidget(form_card)
 
+        list_card, list_layout = self._card_panel("Daftar Case")
+
         filter_row = QHBoxLayout()
         self.case_search = QLineEdit()
         self.case_search.setPlaceholderText("Cari nama customer / case number...")
         self.case_status_filter = QComboBox()
+        self.case_status_filter.setObjectName("deviceSelector")
         self.case_status_filter.addItem("Semua Status")
         for status in CASE_STATUSES:
             self.case_status_filter.addItem(status)
-        self.case_refresh_button = QPushButton("Refresh")
+        self.case_refresh_button = QPushButton("🔄 Refresh")
+        self.case_refresh_button.setObjectName("action")
         self.case_refresh_button.clicked.connect(self.refresh_cases_table)
         filter_row.addWidget(self.case_search, 2)
         filter_row.addWidget(self.case_status_filter, 1)
         filter_row.addWidget(self.case_refresh_button)
-        layout.addLayout(filter_row)
+        list_layout.addLayout(filter_row)
 
         self.cases_table = QTableWidget(0, 6)
         self.cases_table.setHorizontalHeaderLabels(
@@ -3446,12 +3390,15 @@ class MainWindow(QMainWindow):
         self.cases_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.cases_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.cases_table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.cases_table, 1)
+        self.cases_table.setMinimumHeight(260)
+        list_layout.addWidget(self.cases_table)
 
         action_row = QHBoxLayout()
-        self.case_update_status_button = QPushButton("Update Status")
+        self.case_update_status_button = QPushButton("✏ Update Status")
+        self.case_update_status_button.setObjectName("action")
         self.case_update_status_button.clicked.connect(self.update_selected_case_status)
-        self.case_add_note_button = QPushButton("Tambah Catatan")
+        self.case_add_note_button = QPushButton("📝 Tambah Catatan")
+        self.case_add_note_button.setObjectName("action")
         self.case_add_note_button.clicked.connect(self.add_note_to_selected_case)
         self.case_response_button = QPushButton("💬 Respons ke Customer")
         self.case_response_button.setObjectName("action")
@@ -3464,7 +3411,9 @@ class MainWindow(QMainWindow):
         action_row.addWidget(self.case_response_button)
         action_row.addWidget(self.case_timeline_button)
         action_row.addStretch()
-        layout.addLayout(action_row)
+        list_layout.addLayout(action_row)
+
+        layout.addWidget(list_card)
 
         self.case_search.textChanged.connect(self.refresh_cases_table)
         self.case_status_filter.currentIndexChanged.connect(self.refresh_cases_table)
@@ -3750,30 +3699,19 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(32, 28, 32, 28)
-        layout.setSpacing(14)
+        layout.setSpacing(16)
 
-        title = QLabel("Recovery Assistant")
-        title.setObjectName("contentTitle")
-
-        desc = QLabel(
+        layout.addLayout(self._page_header(
+            "Recovery Assistant",
             "Assessment read-only untuk device yang tidak bisa diakses. "
             "Nexa tidak melakukan bypass PIN/pattern/password/FRP. "
             "Gunakan verifikasi kepemilikan resmi sebelum tindakan lanjutan."
-        )
-        desc.setObjectName("muted")
-        desc.setWordWrap(True)
-
-        layout.addWidget(title)
-        layout.addWidget(desc)
+        ))
 
         # --------------------------------------------------------
         # Access / Recovery Assessment
         # --------------------------------------------------------
-        card = QFrame()
-        card.setObjectName("card")
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(22, 20, 22, 20)
-        card_layout.setSpacing(9)
+        card, card_layout = self._card_panel("Ringkasan Akses")
 
         self.recovery_status = QLabel("Belum ada device dipilih.")
         self.recovery_status.setObjectName("status")
@@ -3795,15 +3733,7 @@ class MainWindow(QMainWindow):
         # --------------------------------------------------------
         # FRP / Owner Verification - READ ONLY
         # --------------------------------------------------------
-        frp_title = QLabel("FRP / Owner Verification")
-        frp_title.setObjectName("cardTitle")
-        layout.addWidget(frp_title)
-
-        frp_card = QFrame()
-        frp_card.setObjectName("card")
-        frp_layout = QVBoxLayout(frp_card)
-        frp_layout.setContentsMargins(22, 20, 22, 20)
-        frp_layout.setSpacing(8)
+        frp_card, frp_layout = self._card_panel("FRP / Owner Verification")
 
         self.frp_status_label = QLabel(
             "FRP Status: Belum diperiksa"
@@ -3904,64 +3834,66 @@ class MainWindow(QMainWindow):
         ):
             frp_layout.addWidget(widget)
 
+        btn_grid = QHBoxLayout()
+        btn_grid.setSpacing(8)
+
         self.frp_refresh_button = QPushButton(
-            "Refresh FRP / Owner Verification"
+            "🔄 Refresh FRP / Owner Verification"
         )
         self.frp_refresh_button.setObjectName("action")
         self.frp_refresh_button.clicked.connect(
             self.refresh_frp_verification
         )
-        frp_layout.addWidget(self.frp_refresh_button)
 
         self.frp_service_refresh_button = QPushButton(
-            "Refresh FRP Service State"
+            "🔄 Refresh FRP Service State"
         )
         self.frp_service_refresh_button.setObjectName("action")
         self.frp_service_refresh_button.clicked.connect(
             self.refresh_frp_service_state
         )
+
+        frp_layout.addWidget(self.frp_refresh_button)
         frp_layout.addWidget(self.frp_service_refresh_button)
 
-        self.frp_recovery_button = QPushButton("Reboot ke Recovery")
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+
+        self.frp_recovery_button = QPushButton("🔁 Reboot ke Recovery")
         self.frp_recovery_button.setObjectName("action")
         self.frp_recovery_button.setEnabled(False)
         self.frp_recovery_button.clicked.connect(self.reboot_to_recovery)
-        frp_layout.addWidget(self.frp_recovery_button)
 
-        self.frp_bootloader_button = QPushButton("Reboot ke Bootloader")
+        self.frp_bootloader_button = QPushButton("🔧 Reboot ke Bootloader")
         self.frp_bootloader_button.setObjectName("action")
         self.frp_bootloader_button.setEnabled(False)
         self.frp_bootloader_button.clicked.connect(
             self.reboot_to_bootloader
         )
-        frp_layout.addWidget(self.frp_bootloader_button)
 
-        self.frp_verify_button = QPushButton("Verify FRP Result")
+        self.frp_verify_button = QPushButton("🛡 Verify FRP Result")
         self.frp_verify_button.setObjectName("action")
         self.frp_verify_button.setEnabled(False)
         self.frp_verify_button.clicked.connect(self.verify_frp_result_action)
-        frp_layout.addWidget(self.frp_verify_button)
+
+        action_row.addWidget(self.frp_recovery_button)
+        action_row.addWidget(self.frp_bootloader_button)
+        action_row.addWidget(self.frp_verify_button)
+        frp_layout.addLayout(action_row)
 
         layout.addWidget(frp_card)
 
         # --------------------------------------------------------
         # Locked Device Recovery Workflow
         # --------------------------------------------------------
-        recovery_title = QLabel("Locked Device Recovery Workflow")
-        recovery_title.setObjectName("cardTitle")
-        layout.addWidget(recovery_title)
-
-        recovery_card = QFrame()
-        recovery_card.setObjectName("card")
-        recovery_layout = QVBoxLayout(recovery_card)
-        recovery_layout.setContentsMargins(22, 20, 22, 20)
-        recovery_layout.setSpacing(8)
+        recovery_card, recovery_layout = self._card_panel("Locked Device Recovery Workflow")
 
         self.locked_state_label = QLabel("Locked Recovery State: -")
         self.locked_state_label.setObjectName("status")
 
         self.locked_identity_label = QLabel("Device Identity: -")
         self.locked_identity_label.setObjectName("value")
+        self.locked_identity_label.setWordWrap(True)
 
         self.locked_mode_label = QLabel("Mode: -")
         self.locked_mode_label.setObjectName("value")
@@ -3996,54 +3928,55 @@ class MainWindow(QMainWindow):
         ):
             recovery_layout.addWidget(widget)
 
-        self.locked_detect_button = QPushButton("Detect Locked Device State")
+        self.locked_detect_button = QPushButton("🔍 Detect Locked Device State")
         self.locked_detect_button.setObjectName("action")
         self.locked_detect_button.clicked.connect(self.refresh_locked_device_state)
         recovery_layout.addWidget(self.locked_detect_button)
 
-        self.locked_confirm_button = QPushButton("Confirm Recovery Action")
+        locked_action_row = QHBoxLayout()
+        locked_action_row.setSpacing(8)
+
+        self.locked_confirm_button = QPushButton("✅ Confirm Recovery Action")
         self.locked_confirm_button.setObjectName("action")
         self.locked_confirm_button.setEnabled(False)
         self.locked_confirm_button.clicked.connect(self.confirm_recovery_action)
-        recovery_layout.addWidget(self.locked_confirm_button)
 
-        self.locked_recovery_button = QPushButton("Reboot ke Recovery (Locked Device)")
+        self.locked_recovery_button = QPushButton("🔁 Reboot ke Recovery")
         self.locked_recovery_button.setObjectName("action")
         self.locked_recovery_button.setEnabled(False)
         self.locked_recovery_button.clicked.connect(self.reboot_locked_recovery)
-        recovery_layout.addWidget(self.locked_recovery_button)
 
-        self.locked_bootloader_button = QPushButton("Reboot ke Bootloader (Locked Device)")
+        self.locked_bootloader_button = QPushButton("🔧 Reboot ke Bootloader")
         self.locked_bootloader_button.setObjectName("action")
         self.locked_bootloader_button.setEnabled(False)
         self.locked_bootloader_button.clicked.connect(self.reboot_locked_bootloader)
-        recovery_layout.addWidget(self.locked_bootloader_button)
 
-        self.locked_verify_button = QPushButton("Verify Locked Device Result")
+        self.locked_verify_button = QPushButton("🛡 Verify Result")
         self.locked_verify_button.setObjectName("action")
         self.locked_verify_button.setEnabled(False)
         self.locked_verify_button.clicked.connect(self.verify_locked_result)
-        recovery_layout.addWidget(self.locked_verify_button)
+
+        locked_action_row.addWidget(self.locked_confirm_button)
+        locked_action_row.addWidget(self.locked_recovery_button)
+        locked_action_row.addWidget(self.locked_bootloader_button)
+        locked_action_row.addWidget(self.locked_verify_button)
+        recovery_layout.addLayout(locked_action_row)
 
         layout.addWidget(recovery_card)
 
         # --------------------------------------------------------
         # Recovery Plan
         # --------------------------------------------------------
-        plan_title = QLabel(
-            "Rencana Pemulihan (Locked Device Plan)"
-        )
-        plan_title.setObjectName("cardTitle")
-        layout.addWidget(plan_title)
+        plan_card, plan_layout = self._card_panel("Rencana Pemulihan (Locked Device Plan)")
 
         self.recovery_plan_text = QTextEdit()
         self.recovery_plan_text.setObjectName("value")
         self.recovery_plan_text.setReadOnly(True)
         self.recovery_plan_text.setFixedHeight(160)
-        layout.addWidget(self.recovery_plan_text)
+        plan_layout.addWidget(self.recovery_plan_text)
 
         self.recovery_refresh_button = QPushButton(
-            "Jalankan Assessment"
+            "▶ Jalankan Assessment"
         )
         self.recovery_refresh_button.setObjectName(
             "actionPrimary"
@@ -4051,8 +3984,9 @@ class MainWindow(QMainWindow):
         self.recovery_refresh_button.clicked.connect(
             self.refresh_recovery_assessment
         )
-        layout.addWidget(self.recovery_refresh_button)
+        plan_layout.addWidget(self.recovery_refresh_button)
 
+        layout.addWidget(plan_card)
         layout.addStretch()
 
         return page
@@ -4666,20 +4600,13 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(32, 28, 32, 28)
-        layout.setSpacing(14)
+        layout.setSpacing(16)
 
-        title = QLabel("Settings")
-        title.setObjectName("contentTitle")
-        desc = QLabel("Preferensi aplikasi Nexa Service Tool.")
-        desc.setObjectName("muted")
-        layout.addWidget(title)
-        layout.addWidget(desc)
+        layout.addLayout(self._page_header(
+            "Settings", "Preferensi aplikasi Nexa Service Tool."
+        ))
 
-        card = QFrame()
-        card.setObjectName("card")
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(22, 20, 22, 20)
-        card_layout.setSpacing(10)
+        card, card_layout = self._card_panel("Umum")
 
         refresh_label = QLabel("Auto-refresh device list (ms)")
         refresh_label.setObjectName("muted")
@@ -4957,20 +4884,15 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(32, 28, 32, 28)
-        layout.setSpacing(14)
+        layout.setSpacing(16)
 
-        title = QLabel("Automation")
-        title.setObjectName("contentTitle")
-
-        desc = QLabel(
+        layout.addLayout(self._page_header(
+            "Automation",
             "Susun langkah-langkah (macro) dan jalankan berurutan pada device aktif. "
             "Berguna untuk pekerjaan servis yang berulang."
-        )
-        desc.setObjectName("muted")
-        desc.setWordWrap(True)
+        ))
 
-        layout.addWidget(title)
-        layout.addWidget(desc)
+        builder_card, builder_layout = self._card_panel("Susun Macro")
 
         builder_row = QHBoxLayout()
         builder_row.setSpacing(8)
@@ -4984,7 +4906,7 @@ class MainWindow(QMainWindow):
             "Parameter (contoh: package=com.whatsapp atau cmd=pm list packages)"
         )
 
-        self.automation_add_step_button = QPushButton("Tambah Step")
+        self.automation_add_step_button = QPushButton("➕ Tambah Step")
         self.automation_add_step_button.setObjectName("action")
         self.automation_add_step_button.clicked.connect(self.add_macro_step)
 
@@ -4992,20 +4914,20 @@ class MainWindow(QMainWindow):
         builder_row.addWidget(self.automation_param_input, 1)
         builder_row.addWidget(self.automation_add_step_button)
 
-        layout.addLayout(builder_row)
+        builder_layout.addLayout(builder_row)
 
         self.automation_steps_list = QListWidget()
         self.automation_steps_list.setMaximumHeight(150)
-        layout.addWidget(self.automation_steps_list)
+        builder_layout.addWidget(self.automation_steps_list)
 
         step_btn_row = QHBoxLayout()
         step_btn_row.setSpacing(8)
 
-        self.automation_remove_step_button = QPushButton("Hapus Step Terpilih")
+        self.automation_remove_step_button = QPushButton("🗑 Hapus Step Terpilih")
         self.automation_remove_step_button.setObjectName("action")
         self.automation_remove_step_button.clicked.connect(self.remove_macro_step)
 
-        self.automation_clear_steps_button = QPushButton("Kosongkan")
+        self.automation_clear_steps_button = QPushButton("🧹 Kosongkan")
         self.automation_clear_steps_button.setObjectName("action")
         self.automation_clear_steps_button.clicked.connect(self.clear_macro_steps)
 
@@ -5013,17 +4935,22 @@ class MainWindow(QMainWindow):
         step_btn_row.addWidget(self.automation_clear_steps_button)
         step_btn_row.addStretch()
 
-        layout.addLayout(step_btn_row)
+        builder_layout.addLayout(step_btn_row)
 
-        self.automation_run_button = QPushButton("Jalankan Macro pada Device Aktif")
+        self.automation_run_button = QPushButton("▶ Jalankan Macro pada Device Aktif")
         self.automation_run_button.setObjectName("actionPrimary")
         self.automation_run_button.clicked.connect(self.run_macro_now)
-        layout.addWidget(self.automation_run_button)
+        builder_layout.addWidget(self.automation_run_button)
 
+        layout.addWidget(builder_card)
+
+        log_card, log_layout = self._card_panel("Output Log")
         self.automation_log = QPlainTextEdit()
         self.automation_log.setObjectName("logConsole")
         self.automation_log.setReadOnly(True)
-        layout.addWidget(self.automation_log)
+        self.automation_log.setMinimumHeight(200)
+        log_layout.addWidget(self.automation_log)
+        layout.addWidget(log_card)
 
         return page
 

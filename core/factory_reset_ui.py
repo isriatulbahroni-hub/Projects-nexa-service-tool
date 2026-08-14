@@ -27,14 +27,23 @@ class FactoryResetAssistantPanel(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.setSpacing(10)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(16)
 
         title = QLabel("Factory Reset Assistant")
         title.setObjectName("contentTitle")
         layout.addWidget(title)
 
+        desc = QLabel(
+            "Checklist keamanan sebelum factory reset - tool ini TIDAK pernah "
+            "melakukan wipe otomatis."
+        )
+        desc.setObjectName("muted")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
         warning = QLabel(
-            "PERINGATAN: Factory reset menghapus data pengguna dan tidak "
+            "⚠ PERINGATAN: Factory reset menghapus data pengguna dan tidak "
             "menghapus FRP/ownership. Nexa tidak melakukan wipe otomatis."
         )
         warning.setWordWrap(True)
@@ -44,6 +53,12 @@ class FactoryResetAssistantPanel(QWidget):
         card = QFrame()
         card.setObjectName("card")
         card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(22, 18, 22, 18)
+        card_layout.setSpacing(10)
+
+        checklist_title = QLabel("Checklist Keamanan")
+        checklist_title.setObjectName("cardTitle")
+        card_layout.addWidget(checklist_title)
 
         self.backup = QCheckBox("Backup data sudah dilakukan / tidak diperlukan")
         self.authorization = QCheckBox("Customer/pemilik sudah mengizinkan reset")
@@ -53,21 +68,34 @@ class FactoryResetAssistantPanel(QWidget):
         for check in (self.backup, self.authorization, self.data_loss, self.frp):
             card_layout.addWidget(check)
 
-        self.prepare_button = QPushButton("PREPARE OFFICIAL RECOVERY")
+        self.prepare_button = QPushButton("✅ PREPARE OFFICIAL RECOVERY")
         self.prepare_button.setObjectName("actionPrimary")
         self.prepare_button.clicked.connect(self.prepare_recovery)
         card_layout.addWidget(self.prepare_button)
         layout.addWidget(card)
 
+        instructions_card = QFrame()
+        instructions_card.setObjectName("card")
+        instructions_layout = QVBoxLayout(instructions_card)
+        instructions_layout.setContentsMargins(22, 18, 22, 18)
+        instructions_layout.setSpacing(10)
+
+        instructions_title = QLabel("Instruksi & Peringatan")
+        instructions_title.setObjectName("cardTitle")
+        instructions_layout.addWidget(instructions_title)
+
         self.instructions = QTextEdit()
+        self.instructions.setObjectName("value")
         self.instructions.setReadOnly(True)
         self.instructions.setPlainText("\n".join(f"• {item}" for item in self.plan.warnings))
-        layout.addWidget(self.instructions)
+        instructions_layout.addWidget(self.instructions)
 
-        self.post_reset_button = QPushButton("SHOW POST-RESET CHECKLIST")
+        self.post_reset_button = QPushButton("📋 SHOW POST-RESET CHECKLIST")
         self.post_reset_button.setObjectName("action")
         self.post_reset_button.clicked.connect(self.show_post_reset)
-        layout.addWidget(self.post_reset_button)
+        instructions_layout.addWidget(self.post_reset_button)
+
+        layout.addWidget(instructions_card)
 
     def prepare_recovery(self):
         self.plan.checklist.backup_confirmed = self.backup.isChecked()

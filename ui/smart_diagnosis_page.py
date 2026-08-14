@@ -39,18 +39,20 @@ class SmartDiagnosisPage(QWidget):
     def _build(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(32, 28, 32, 28)
-        layout.setSpacing(14)
+        layout.setSpacing(16)
 
         title = QLabel("Smart Diagnosis")
         title.setObjectName("contentTitle")
         desc = QLabel("Rule-based diagnosis dari data device yang sudah dikumpulkan Nexa.")
         desc.setObjectName("muted")
+        desc.setWordWrap(True)
         layout.addWidget(title)
         layout.addWidget(desc)
 
         summary = QFrame()
         summary.setObjectName("card")
         summary_layout = QHBoxLayout(summary)
+        summary_layout.setContentsMargins(22, 18, 22, 18)
         self.score_label = QLabel("-- / 100")
         self.score_label.setObjectName("scoreBig")
         self.status_label = QLabel("Belum dijalankan")
@@ -59,13 +61,23 @@ class SmartDiagnosisPage(QWidget):
         summary_layout.addWidget(self.status_label, 1)
         layout.addWidget(summary)
 
+        card = QFrame()
+        card.setObjectName("card")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(22, 18, 22, 18)
+        card_layout.setSpacing(10)
+
+        results_title = QLabel("Hasil Scan")
+        results_title.setObjectName("cardTitle")
+        card_layout.addWidget(results_title)
+
         self.score_bar = QProgressBar()
         self.score_bar.setRange(0, 100)
         self.score_bar.setValue(0)
-        layout.addWidget(self.score_bar)
+        card_layout.addWidget(self.score_bar)
 
         actions = QHBoxLayout()
-        self.run_button = QPushButton("RUN SMART SCAN")
+        self.run_button = QPushButton("🔍 RUN SMART SCAN")
         self.run_button.setObjectName("actionPrimary")
         # PENTING: jangan connect langsung ke self.run_scan di sini.
         # QPushButton.clicked selalu mengirim parameter `checked` (bool)
@@ -80,20 +92,34 @@ class SmartDiagnosisPage(QWidget):
         self.run_button.clicked.connect(lambda checked=False: self.run_scan())
         actions.addWidget(self.run_button)
         actions.addStretch()
-        layout.addLayout(actions)
+        card_layout.addLayout(actions)
 
         self.findings_table = QTableWidget(0, 4)
         self.findings_table.setHorizontalHeaderLabels(["Code", "Severity", "Finding", "Summary"])
         self.findings_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.findings_table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.findings_table, 2)
+        self.findings_table.setMinimumHeight(220)
+        card_layout.addWidget(self.findings_table)
+
+        layout.addWidget(card)
+
+        rec_card = QFrame()
+        rec_card.setObjectName("card")
+        rec_layout = QVBoxLayout(rec_card)
+        rec_layout.setContentsMargins(22, 18, 22, 18)
+        rec_layout.setSpacing(10)
 
         rec_title = QLabel("Rekomendasi Aman")
         rec_title.setObjectName("cardTitle")
-        layout.addWidget(rec_title)
+        rec_layout.addWidget(rec_title)
+
         self.recommendations = QPlainTextEdit()
+        self.recommendations.setObjectName("logConsole")
         self.recommendations.setReadOnly(True)
-        layout.addWidget(self.recommendations, 1)
+        self.recommendations.setMinimumHeight(140)
+        rec_layout.addWidget(self.recommendations)
+
+        layout.addWidget(rec_card)
 
     def run_scan(self, facts: dict[str, Any] | None = None) -> DiagnosisReport | None:
         if facts is not None:
