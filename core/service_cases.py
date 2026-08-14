@@ -15,6 +15,7 @@ from .config import PROJECT_ROOT
 DB_PATH = PROJECT_ROOT / "data" / "nexa_service.db"
 
 STATUSES = ("Received", "Diagnosing", "Repairing", "Testing", "Completed", "Cancelled")
+PAYMENT_STATUSES = ("Belum Bayar", "DP", "Lunas")
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,18 @@ class ServiceCase:
     notes: str
     created_at: str
     updated_at: str
+    payment_status: str = "Belum Bayar"
+    paid_amount: float = 0.0
+    estimated_completion: str = ""
+
+
+@dataclass(frozen=True)
+class CasePhoto:
+    id: int
+    case_id: int
+    photo_path: str
+    caption: str
+    created_at: str
 
 
 def _connection() -> sqlite3.Connection:
@@ -41,6 +54,16 @@ def _connection() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    """Migrasi ringan: tambah kolom kalau belum ada, supaya database yang
+    sudah ada (dibuat sebelum fitur ini ditambahkan) tidak perlu dihapus
+    manual - CREATE TABLE IF NOT EXISTS saja tidak menambah kolom baru ke
+    tabel yang sudah eksis sebelumnya."""
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
 def init_service_cases() -> None:
@@ -75,11 +98,25 @@ def init_service_cases() -> None:
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(case_id) REFERENCES service_cases(id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS service_case_photos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                case_id INTEGER NOT NULL,
+                photo_path TEXT NOT NULL,
+                caption TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(case_id) REFERENCES service_cases(id) ON DELETE CASCADE
+            );
             CREATE INDEX IF NOT EXISTS idx_service_cases_status ON service_cases(status);
             CREATE INDEX IF NOT EXISTS idx_service_cases_serial ON service_cases(device_serial);
             CREATE INDEX IF NOT EXISTS idx_service_case_events_case ON service_case_events(case_id);
+            CREATE INDEX IF NOT EXISTS idx_service_case_photos_case ON service_case_photos(case_id);
             """
         )
+        # Migrasi kolom baru (payment tracking, SLA) untuk database yang
+        # sudah ada dari sebelum fitur ini ditambahkan.
+        _ensure_column(conn, "service_cases", "payment_status", "TEXT NOT NULL DEFAULT 'Belum Bayar'")
+        _ensure_column(conn, "service_cases", "paid_amount", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(conn, "service_cases", "estimated_completion", "TEXT DEFAULT ''")
         conn.commit()
     finally:
         conn.close()
@@ -110,6 +147,7 @@ def create_case(
     technician: str = "",
     estimated_cost: float = 0,
     notes: str = "",
+    estimated_completion: str = "",
 ) -> ServiceCase:
     if not customer_name.strip():
         raise ValueError("customer_name is required")
@@ -127,12 +165,12 @@ def create_case(
             """INSERT INTO service_cases
             (case_number, customer_name, customer_phone, device_serial, imei,
              manufacturer, model, complaint, technician, status, estimated_cost, notes,
-             created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Received', ?, ?, ?, ?)""",
+             created_at, updated_at, payment_status, paid_amount, estimated_completion)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Received', ?, ?, ?, ?, 'Belum Bayar', 0, ?)""",
             (case_number, customer_name.strip(), customer_phone.strip(),
              device_serial.strip(), imei.strip(), manufacturer.strip(),
              model.strip(), complaint.strip(), technician.strip(), float(estimated_cost),
-             notes.strip(), now, now),
+             notes.strip(), now, now, estimated_completion.strip()),
         )
         case_id = cur.lastrowid
         conn.execute(
@@ -239,5 +277,108 @@ def get_timeline(case_id: int) -> list[dict[str, object]]:
             (case_id,),
         ).fetchall()
         return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def update_payment(case_id: int, payment_status: str, paid_amount: float, note: str = "") -> ServiceCase:
+    if payment_status not in PAYMENT_STATUSES:
+        raise ValueError(f"invalid payment_status: {payment_status}")
+    if paid_amount < 0:
+        raise ValueError("paid_amount cannot be negative")
+
+    init_service_cases()
+    now = datetime.now().isoformat(timespec="seconds")
+    conn = _connection()
+    try:
+        row = conn.execute(
+            "SELECT payment_status, paid_amount FROM service_cases WHERE id = ?", (case_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"service case {case_id} not found")
+
+        conn.execute(
+            "UPDATE service_cases SET payment_status = ?, paid_amount = ?, updated_at = ? WHERE id = ?",
+            (payment_status, float(paid_amount), now, case_id),
+        )
+        conn.execute(
+            """INSERT INTO service_case_events
+            (case_id, event_type, old_value, new_value, note, created_at)
+            VALUES (?, 'payment', ?, ?, ?, ?)""",
+            (
+                case_id,
+                f"{row['payment_status']} (Rp{row['paid_amount']:,.0f})",
+                f"{payment_status} (Rp{paid_amount:,.0f})",
+                note.strip(),
+                now,
+            ),
+        )
+        conn.commit()
+        return get_case(case_id)
+    finally:
+        conn.close()
+
+
+def update_estimated_completion(case_id: int, estimated_completion: str) -> ServiceCase:
+    init_service_cases()
+    now = datetime.now().isoformat(timespec="seconds")
+    conn = _connection()
+    try:
+        if conn.execute("SELECT 1 FROM service_cases WHERE id = ?", (case_id,)).fetchone() is None:
+            raise KeyError(f"service case {case_id} not found")
+        conn.execute(
+            "UPDATE service_cases SET estimated_completion = ?, updated_at = ? WHERE id = ?",
+            (estimated_completion.strip(), now, case_id),
+        )
+        conn.commit()
+        return get_case(case_id)
+    finally:
+        conn.close()
+
+
+def add_photo(case_id: int, photo_path: str, caption: str = "") -> CasePhoto:
+    init_service_cases()
+    now = datetime.now().isoformat(timespec="seconds")
+    conn = _connection()
+    try:
+        if conn.execute("SELECT 1 FROM service_cases WHERE id = ?", (case_id,)).fetchone() is None:
+            raise KeyError(f"service case {case_id} not found")
+
+        cur = conn.execute(
+            "INSERT INTO service_case_photos (case_id, photo_path, caption, created_at) VALUES (?, ?, ?, ?)",
+            (case_id, photo_path, caption.strip(), now),
+        )
+        conn.execute(
+            "INSERT INTO service_case_events (case_id, event_type, note, created_at) VALUES (?, 'photo', ?, ?)",
+            (case_id, caption.strip() or "Foto ditambahkan", now),
+        )
+        conn.commit()
+        photo_id = cur.lastrowid
+        row = conn.execute(
+            "SELECT * FROM service_case_photos WHERE id = ?", (photo_id,)
+        ).fetchone()
+        return CasePhoto(**dict(row))
+    finally:
+        conn.close()
+
+
+def get_photos(case_id: int) -> list[CasePhoto]:
+    init_service_cases()
+    conn = _connection()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM service_case_photos WHERE case_id = ? ORDER BY id ASC",
+            (case_id,),
+        ).fetchall()
+        return [CasePhoto(**dict(row)) for row in rows]
+    finally:
+        conn.close()
+
+
+def delete_photo(photo_id: int) -> None:
+    conn = _connection()
+    try:
+        conn.execute("DELETE FROM service_case_photos WHERE id = ?", (photo_id,))
+        conn.commit()
     finally:
         conn.close()

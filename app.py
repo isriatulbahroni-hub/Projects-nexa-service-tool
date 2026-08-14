@@ -1,4 +1,5 @@
 import platform
+import shutil
 import sys
 import time
 from datetime import datetime
@@ -9,8 +10,8 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     psutil = None
 
-from PySide6.QtCore import QTimer, Qt, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QTimer, Qt, QPropertyAnimation, QEasingCurve, QUrl
+from PySide6.QtGui import QPixmap, QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -48,7 +49,7 @@ from core.adb import (
     run_adb_binary,
     _resolve_adb_path,
 )
-from core.config import ADB_PATH
+from core.config import ADB_PATH, PROJECT_ROOT
 from core.device import get_device_info
 from core.diagnostics import (
     compute_health_score,
@@ -103,13 +104,20 @@ from core import automation
 from core.automation import Macro, MacroStep, ACTIONS, MacroError
 from core.service_cases import (
     STATUSES as CASE_STATUSES,
+    PAYMENT_STATUSES as CASE_PAYMENT_STATUSES,
     create_case,
     list_cases,
     get_case,
     update_status as update_case_status,
     add_note as add_case_note,
     get_timeline as get_case_timeline,
+    update_payment as update_case_payment_db,
+    add_photo as add_case_photo_db,
+    get_photos as get_case_photos_db,
+    delete_photo as delete_case_photo_db,
 )
+from core.invoice import generate_case_invoice, generate_case_label
+from core.whatsapp import build_whatsapp_link, build_case_status_message
 from core.recovery_actions import assess_access, factory_reset_guidance
 from core.device_access_recovery import diagnose_access_issue
 from core.locked_device_recovery import (
@@ -3346,10 +3354,13 @@ class MainWindow(QMainWindow):
         self.case_technician.setPlaceholderText("Teknisi penanggung jawab")
         self.case_cost = QLineEdit()
         self.case_cost.setPlaceholderText("Estimasi biaya (Rp)")
+        self.case_sla = QLineEdit()
+        self.case_sla.setPlaceholderText("Estimasi selesai (mis: 2026-08-16 atau 'Besok sore')")
 
         for widget in (
             self.case_customer_name, self.case_customer_phone,
             self.case_complaint, self.case_technician, self.case_cost,
+            self.case_sla,
         ):
             form_layout.addWidget(widget)
 
@@ -3383,9 +3394,9 @@ class MainWindow(QMainWindow):
         filter_row.addWidget(self.case_refresh_button)
         list_layout.addLayout(filter_row)
 
-        self.cases_table = QTableWidget(0, 6)
+        self.cases_table = QTableWidget(0, 8)
         self.cases_table.setHorizontalHeaderLabels(
-            ["Case #", "Customer", "Device", "Complaint", "Status", "Updated"]
+            ["Case #", "Customer", "Device", "Complaint", "Status", "Pembayaran", "Estimasi Selesai", "Updated"]
         )
         self.cases_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.cases_table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -3412,6 +3423,33 @@ class MainWindow(QMainWindow):
         action_row.addWidget(self.case_timeline_button)
         action_row.addStretch()
         list_layout.addLayout(action_row)
+
+        # Baris kedua: fitur untuk teknisi service center - dokumentasi
+        # foto (proteksi dari komplain "HP saya lecet gara-gara diservis"),
+        # cetak nota/label fisik, update pembayaran, notifikasi WhatsApp.
+        action_row2 = QHBoxLayout()
+        self.case_photo_button = QPushButton("📷 Kelola Foto")
+        self.case_photo_button.setObjectName("action")
+        self.case_photo_button.clicked.connect(self.manage_case_photos)
+        self.case_payment_button = QPushButton("💳 Update Pembayaran")
+        self.case_payment_button.setObjectName("action")
+        self.case_payment_button.clicked.connect(self.update_case_payment)
+        self.case_invoice_button = QPushButton("🖨 Cetak Nota")
+        self.case_invoice_button.setObjectName("action")
+        self.case_invoice_button.clicked.connect(self.print_case_invoice)
+        self.case_label_button = QPushButton("🏷 Cetak Label")
+        self.case_label_button.setObjectName("action")
+        self.case_label_button.clicked.connect(self.print_case_label)
+        self.case_whatsapp_button = QPushButton("📲 Notifikasi WA")
+        self.case_whatsapp_button.setObjectName("action")
+        self.case_whatsapp_button.clicked.connect(self.send_case_whatsapp_notification)
+        action_row2.addWidget(self.case_photo_button)
+        action_row2.addWidget(self.case_payment_button)
+        action_row2.addWidget(self.case_invoice_button)
+        action_row2.addWidget(self.case_label_button)
+        action_row2.addWidget(self.case_whatsapp_button)
+        action_row2.addStretch()
+        list_layout.addLayout(action_row2)
 
         layout.addWidget(list_card)
 
@@ -3446,6 +3484,7 @@ class MainWindow(QMainWindow):
                 model=device.model if device else "",
                 technician=self.case_technician.text().strip(),
                 estimated_cost=cost,
+                estimated_completion=self.case_sla.text().strip(),
             )
         except ValueError as exc:
             QMessageBox.warning(self, "Gagal Menyimpan Case", str(exc))
@@ -3457,6 +3496,7 @@ class MainWindow(QMainWindow):
         for widget in (
             self.case_customer_name, self.case_customer_phone,
             self.case_complaint, self.case_technician, self.case_cost,
+            self.case_sla,
         ):
             widget.clear()
 
@@ -3564,12 +3604,30 @@ class MainWindow(QMainWindow):
             device_label = f"{case.manufacturer} {case.model}".strip() or "-"
             values = [
                 case.case_number, case.customer_name, device_label,
-                case.complaint, case.status, case.updated_at,
+                case.complaint, case.status, case.payment_status,
+                case.estimated_completion or "-", case.updated_at,
             ]
+            # Sorotan visual kalau SLA sudah lewat dan case belum selesai -
+            # supaya teknisi/owner langsung lihat mana case yang kelamaan
+            # ngendon tanpa harus buka satu-satu.
+            overdue = self._is_case_overdue(case)
+
             for col, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
                 item.setData(Qt.UserRole, case.id)
+                if overdue:
+                    item.setForeground(QColor("#ff6b6b"))
                 self.cases_table.setItem(row, col, item)
+
+    @staticmethod
+    def _is_case_overdue(case) -> bool:
+        if case.status in ("Completed", "Cancelled") or not case.estimated_completion:
+            return False
+        try:
+            deadline = datetime.fromisoformat(case.estimated_completion[:19])
+        except ValueError:
+            return False
+        return datetime.now() > deadline
 
     def _selected_case_id(self) -> int | None:
         row = self.cases_table.currentRow()
@@ -3650,6 +3708,288 @@ class MainWindow(QMainWindow):
         dialog_layout.addWidget(close_button)
 
         dialog.exec()
+
+    # ------------------------------------------------------------------
+    # Dokumentasi foto - proteksi teknisi dari komplain "device rusak
+    # gara-gara diservis" dengan bukti foto kondisi sebelum dikerjakan.
+    # ------------------------------------------------------------------
+    def manage_case_photos(self):
+        case_id = self._selected_case_id()
+        if case_id is None:
+            QMessageBox.warning(self, "Pilih Case", "Pilih case dari tabel dulu.")
+            return
+
+        try:
+            case = get_case(case_id)
+        except Exception as exc:
+            QMessageBox.critical(self, "Gagal", str(exc))
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Foto - {case.case_number} ({case.customer_name})")
+        dialog.resize(520, 420)
+        dialog_layout = QVBoxLayout(dialog)
+
+        info = QLabel(
+            "Dokumentasikan kondisi device (mis. sebelum diservis) sebagai "
+            "bukti untuk pelanggan maupun perlindungan teknisi."
+        )
+        info.setWordWrap(True)
+        info.setObjectName("muted")
+        dialog_layout.addWidget(info)
+
+        photo_list = QListWidget()
+        dialog_layout.addWidget(photo_list)
+
+        def _reload_list():
+            photo_list.clear()
+            for photo in get_case_photos_db(case_id):
+                label = Path(photo.photo_path).name
+                if photo.caption:
+                    label += f" - {photo.caption}"
+                item = QListWidgetItem(label)
+                item.setData(Qt.UserRole, photo)
+                photo_list.addItem(item)
+
+        _reload_list()
+
+        btn_row = QHBoxLayout()
+        add_button = QPushButton("➕ Tambah Foto...")
+        add_button.setObjectName("actionPrimary")
+        open_button = QPushButton("🖼 Buka")
+        open_button.setObjectName("action")
+        delete_button = QPushButton("🗑 Hapus")
+        delete_button.setObjectName("actionDanger")
+        btn_row.addWidget(add_button)
+        btn_row.addWidget(open_button)
+        btn_row.addWidget(delete_button)
+        dialog_layout.addLayout(btn_row)
+
+        close_button = QPushButton("Tutup")
+        close_button.clicked.connect(dialog.accept)
+        dialog_layout.addWidget(close_button)
+
+        def _add_photo():
+            file_path, _ = QFileDialog.getOpenFileName(
+                dialog, "Pilih Foto", "", "Images (*.jpg *.jpeg *.png *.webp)"
+            )
+            if not file_path:
+                return
+
+            caption, ok = QInputDialog.getText(
+                dialog, "Keterangan Foto",
+                "Keterangan (mis: 'Kondisi awal - layar retak'):",
+            )
+            if not ok:
+                caption = ""
+
+            # Foto disalin ke folder lokal per-case supaya tidak hilang
+            # kalau file aslinya dipindah/dihapus dari lokasi awal.
+            dest_dir = PROJECT_ROOT / "data" / "case_photos" / case.case_number
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            src = Path(file_path)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            dest = dest_dir / f"{timestamp}_{src.name}"
+
+            try:
+                shutil.copy2(src, dest)
+                add_case_photo_db(case_id, str(dest), caption)
+                self.log_action(
+                    "Tambah Foto Case", detail=f"{case.case_number}: {caption or dest.name}",
+                    status="OK", serial=case.device_serial,
+                )
+                _reload_list()
+            except OSError as exc:
+                QMessageBox.critical(dialog, "Gagal", f"Gagal menyalin foto: {exc}")
+
+        def _open_photo():
+            item = photo_list.currentItem()
+            if not item:
+                QMessageBox.information(dialog, "Pilih Foto", "Pilih foto dari daftar dulu.")
+                return
+            photo = item.data(Qt.UserRole)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(photo.photo_path))
+
+        def _delete_photo():
+            item = photo_list.currentItem()
+            if not item:
+                QMessageBox.information(dialog, "Pilih Foto", "Pilih foto dari daftar dulu.")
+                return
+            photo = item.data(Qt.UserRole)
+            reply = QMessageBox.question(
+                dialog, "Konfirmasi", "Hapus foto ini dari catatan case?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                delete_case_photo_db(photo.id)
+                _reload_list()
+
+        add_button.clicked.connect(_add_photo)
+        open_button.clicked.connect(_open_photo)
+        delete_button.clicked.connect(_delete_photo)
+
+        dialog.exec()
+
+    # ------------------------------------------------------------------
+    # Pembayaran
+    # ------------------------------------------------------------------
+    def update_case_payment(self):
+        case_id = self._selected_case_id()
+        if case_id is None:
+            QMessageBox.warning(self, "Pilih Case", "Pilih case dari tabel dulu.")
+            return
+
+        try:
+            case = get_case(case_id)
+        except Exception as exc:
+            QMessageBox.critical(self, "Gagal", str(exc))
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Update Pembayaran - {case.case_number}")
+        dialog_layout = QVBoxLayout(dialog)
+
+        info = QLabel(
+            f"Estimasi biaya: Rp {case.estimated_cost:,.0f}\n"
+            f"Status saat ini: {case.payment_status} (Rp {case.paid_amount:,.0f})"
+        )
+        dialog_layout.addWidget(info)
+
+        status_combo = QComboBox()
+        status_combo.addItems(CASE_PAYMENT_STATUSES)
+        status_combo.setCurrentText(case.payment_status)
+        dialog_layout.addWidget(QLabel("Status Pembayaran"))
+        dialog_layout.addWidget(status_combo)
+
+        amount_input = QLineEdit(str(int(case.paid_amount)))
+        dialog_layout.addWidget(QLabel("Jumlah Dibayar (Rp)"))
+        dialog_layout.addWidget(amount_input)
+
+        save_button = QPushButton("💾 Simpan")
+        save_button.setObjectName("actionPrimary")
+        dialog_layout.addWidget(save_button)
+
+        def _save():
+            try:
+                amount = float(amount_input.text().strip().replace(".", "").replace(",", "") or "0")
+            except ValueError:
+                QMessageBox.warning(dialog, "Jumlah Tidak Valid", "Jumlah dibayar harus berupa angka.")
+                return
+
+            try:
+                update_case_payment_db(case_id, status_combo.currentText(), amount)
+                self.log_action(
+                    "Update Pembayaran", detail=f"{case.case_number}: {status_combo.currentText()} (Rp{amount:,.0f})",
+                    status="OK", serial=case.device_serial,
+                )
+                self.refresh_cases_table()
+                dialog.accept()
+            except (ValueError, KeyError) as exc:
+                QMessageBox.critical(dialog, "Gagal", str(exc))
+
+        save_button.clicked.connect(_save)
+        dialog.exec()
+
+    # ------------------------------------------------------------------
+    # Cetak nota & label
+    # ------------------------------------------------------------------
+    def print_case_invoice(self):
+        case_id = self._selected_case_id()
+        if case_id is None:
+            QMessageBox.warning(self, "Pilih Case", "Pilih case dari tabel dulu.")
+            return
+
+        try:
+            case = get_case(case_id)
+        except Exception as exc:
+            QMessageBox.critical(self, "Gagal", str(exc))
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Simpan Nota", f"Nota_{case.case_number}.pdf", "PDF Files (*.pdf)"
+        )
+        if not file_path:
+            return
+
+        try:
+            generate_case_invoice(case, Path(file_path))
+            self.log_action(
+                "Cetak Nota", detail=f"{case.case_number} -> {file_path}",
+                status="OK", serial=case.device_serial,
+            )
+            QDesktopServices.openUrl(QUrl.fromLocalFile(file_path))
+        except Exception as exc:
+            QMessageBox.critical(self, "Gagal Membuat Nota", str(exc))
+
+    def print_case_label(self):
+        case_id = self._selected_case_id()
+        if case_id is None:
+            QMessageBox.warning(self, "Pilih Case", "Pilih case dari tabel dulu.")
+            return
+
+        try:
+            case = get_case(case_id)
+        except Exception as exc:
+            QMessageBox.critical(self, "Gagal", str(exc))
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Simpan Label", f"Label_{case.case_number}.pdf", "PDF Files (*.pdf)"
+        )
+        if not file_path:
+            return
+
+        try:
+            generate_case_label(case, Path(file_path))
+            self.log_action(
+                "Cetak Label", detail=f"{case.case_number} -> {file_path}",
+                status="OK", serial=case.device_serial,
+            )
+            QDesktopServices.openUrl(QUrl.fromLocalFile(file_path))
+        except Exception as exc:
+            QMessageBox.critical(self, "Gagal Membuat Label", str(exc))
+
+    # ------------------------------------------------------------------
+    # Notifikasi WhatsApp (link click-to-chat, bukan pengiriman otomatis)
+    # ------------------------------------------------------------------
+    def send_case_whatsapp_notification(self):
+        case_id = self._selected_case_id()
+        if case_id is None:
+            QMessageBox.warning(self, "Pilih Case", "Pilih case dari tabel dulu.")
+            return
+
+        try:
+            case = get_case(case_id)
+        except Exception as exc:
+            QMessageBox.critical(self, "Gagal", str(exc))
+            return
+
+        if not case.customer_phone.strip():
+            QMessageBox.warning(
+                self, "No. HP Kosong", "Case ini tidak punya nomor HP pelanggan."
+            )
+            return
+
+        default_message = build_case_status_message(case)
+        message, ok = QInputDialog.getMultiLineText(
+            self, "Notifikasi WhatsApp",
+            "Edit pesan sebelum dikirim (akan membuka WhatsApp - klik Send secara manual):",
+            default_message,
+        )
+        if not ok or not message.strip():
+            return
+
+        try:
+            link = build_whatsapp_link(case.customer_phone, message)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Nomor Tidak Valid", str(exc))
+            return
+
+        QDesktopServices.openUrl(QUrl(link))
+        self.log_action(
+            "Kirim Notifikasi WA", detail=f"{case.case_number} -> {case.customer_phone}",
+            status="OK", serial=case.device_serial,
+        )
 
     def update_selected_case_status(self):
         case_id = self._selected_case_id()
