@@ -676,7 +676,26 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(root)
 
+        # Semua label yang menampilkan info device/diagnostics/status
+        # (objectName "value"/"status"/"muted") sebelumnya QLabel polos -
+        # teksnya tidak bisa di-select/copy sama sekali, dan kursor tidak
+        # berubah saat di-hover. Diaktifkan sekali di sini untuk SEMUA
+        # label sekaligus (bukan satu-satu di ~67 tempat pembuatan label),
+        # supaya teknisi bisa select+copy info seperti serial number,
+        # IMEI, error message, dll untuk ditempel ke WhatsApp/nota/dsb.
+        self._enable_text_selection_for_info_labels()
+
         self.switch_page("dashboard")
+
+    def _enable_text_selection_for_info_labels(self):
+        selectable_object_names = {"value", "status", "muted"}
+
+        for label in self.findChildren(QLabel):
+            if label.objectName() in selectable_object_names:
+                label.setTextInteractionFlags(
+                    Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
+                )
+                label.setCursor(Qt.IBeamCursor)
 
     def refresh_all_data(self):
         """Reload device list + semua data yang sudah pernah di-fetch
