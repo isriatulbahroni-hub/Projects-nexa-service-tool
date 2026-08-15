@@ -145,7 +145,7 @@ logger = get_logger("app")
 
 STYLESHEET = """
 QMainWindow {
-    background: #0d0f13;
+    background: #07090a;
 }
 
 QWidget {
@@ -153,31 +153,31 @@ QWidget {
 }
 
 QLabel {
-    color: #e8eaed;
+    color: #e8eaea;
 }
 
 #sidebar {
-    background: #14161c;
-    border-right: 1px solid #22262f;
+    background: #0b0d0b;
+    border-right: 1px solid #1e241e;
 }
 
 #sidebarRail {
-    background: #0e0f13;
-    border-right: 1px solid #22262f;
+    background: #08090a;
+    border-right: 1px solid #1e241e;
 }
 
 #sidebarToggle {
-    background: #1a1d24;
-    color: #e8eaed;
-    border: 1px solid #2b2f3a;
+    background: #12140f;
+    color: #e8eaea;
+    border: 1px solid #232923;
     border-radius: 8px;
     font-size: 15px;
 }
 
 #sidebarToggle:hover {
-    background: #ff5a1f;
-    color: white;
-    border-color: #ff5a1f;
+    background: #1fe583;
+    color: #06140b;
+    border-color: #1fe583;
 }
 
 #brand {
@@ -187,13 +187,13 @@ QLabel {
 }
 
 #subtitle, #muted {
-    color: #7d8590;
+    color: #7d8a80;
     font-size: 12px;
 }
 
 #navBtn {
     background: transparent;
-    color: #b7bdc7;
+    color: #b7bdb7;
     border: none;
     text-align: left;
     padding: 11px 14px;
@@ -202,13 +202,13 @@ QLabel {
 }
 
 #navBtn:hover {
-    background: #1d212a;
+    background: #10140f;
     color: white;
 }
 
 #navBtn:checked {
-    background: #ff5a1f;
-    color: white;
+    background: #12271a;
+    color: #2be08a;
     font-weight: 600;
 }
 
@@ -226,14 +226,14 @@ QLabel {
 
 #navScroll QScrollBar::handle:vertical,
 #contentScroll QScrollBar::handle:vertical {
-    background: #3a3f4b;
+    background: #2b332b;
     border-radius: 5px;
     min-height: 24px;
 }
 
 #navScroll QScrollBar::handle:vertical:hover,
 #contentScroll QScrollBar::handle:vertical:hover {
-    background: #ff5a1f;
+    background: #1fe583;
 }
 
 #navScroll QScrollBar::add-line:vertical,
@@ -252,9 +252,9 @@ QLabel {
 }
 
 #deviceSelector {
-    background: #1a1d24;
+    background: #12140f;
     color: white;
-    border: 1px solid #2b2f3a;
+    border: 1px solid #232923;
     border-radius: 8px;
     padding: 8px 10px;
     font-size: 13px;
@@ -267,8 +267,8 @@ QLabel {
 }
 
 #card {
-    background: #14161c;
-    border: 1px solid #22262f;
+    background: #0f120f;
+    border: 1px solid #1e241e;
     border-radius: 14px;
 }
 
@@ -284,14 +284,14 @@ QLabel {
 }
 
 #value {
-    color: #d3d7de;
+    color: #d3d7d1;
     font-size: 13px;
 }
 
 #action {
-    background: #1a1d24;
+    background: #12140f;
     color: white;
-    border: 1px solid #2b2f3a;
+    border: 1px solid #232923;
     text-align: center;
     padding: 10px 16px;
     border-radius: 8px;
@@ -299,12 +299,12 @@ QLabel {
 }
 
 #action:hover {
-    background: #23272f;
+    background: #1a201a;
 }
 
 #actionPrimary {
-    background: #ff5a1f;
-    color: white;
+    background: #16c76e;
+    color: #06140b;
     border: none;
     text-align: center;
     padding: 10px 16px;
@@ -314,7 +314,7 @@ QLabel {
 }
 
 #actionPrimary:hover {
-    background: #ff6f3c;
+    background: #1fe583;
 }
 
 #actionDanger {
@@ -337,46 +337,46 @@ QLabel {
 }
 
 #logConsole {
-    background: #0a0b0e;
-    color: #b7ffb0;
-    border: 1px solid #22262f;
+    background: #060706;
+    color: #7dffb0;
+    border: 1px solid #1e241e;
     border-radius: 10px;
     font-family: Consolas, monospace;
     font-size: 12px;
 }
 
 QTableWidget {
-    background: #14161c;
-    color: #d3d7de;
-    border: 1px solid #22262f;
+    background: #0f120f;
+    color: #d3d7d1;
+    border: 1px solid #1e241e;
     border-radius: 10px;
-    gridline-color: #22262f;
+    gridline-color: #1e241e;
 }
 
 QTableWidget QTableCornerButton::section {
-    background: #1a1d24;
+    background: #12140f;
     border: none;
 }
 
 QTextEdit, QPlainTextEdit {
-    background: #14161c;
-    color: #d3d7de;
-    border: 1px solid #22262f;
+    background: #0f120f;
+    color: #d3d7d1;
+    border: 1px solid #1e241e;
     border-radius: 10px;
     padding: 8px;
-    selection-background-color: #ff5a1f;
+    selection-background-color: #1fe583;
 }
 
 QHeaderView::section {
-    background: #1a1d24;
-    color: #b7bdc7;
+    background: #12140f;
+    color: #b7bdb7;
     padding: 6px;
     border: none;
     font-size: 12px;
 }
 
 QProgressBar {
-    background: #1a1d24;
+    background: #12140f;
     border: none;
     border-radius: 6px;
     height: 10px;
@@ -1180,11 +1180,11 @@ class MainWindow(QMainWindow):
         if frp_state.authorized:
             self.dash_frp_value.setText("LOCKED" if locked else "UNLOCKED")
             self.dash_frp_value.setStyleSheet(
-                f"font-size:20px; color:{'#ff6b6b' if locked else '#3ddc84'};"
+                f"font-size:20px; color:{'#ff6b6b' if locked else '#22e583'};"
             )
         else:
             self.dash_frp_value.setText("N/A")
-            self.dash_frp_value.setStyleSheet("font-size:20px; color:#7d8590;")
+            self.dash_frp_value.setStyleSheet("font-size:20px; color:#7d8a80;")
         self.dash_frp_sub.setText(
             "Owner Verification Required" if locked else frp_state.message
         )
@@ -1193,9 +1193,9 @@ class MainWindow(QMainWindow):
         if unlocked_flag in ("yes", "true", "1"):
             boot_text, boot_color = "Unlocked", "#ffb020"
         elif unlocked_flag in ("no", "false", "0"):
-            boot_text, boot_color = "Locked", "#3ddc84"
+            boot_text, boot_color = "Locked", "#22e583"
         else:
-            boot_text, boot_color = "Unknown", "#7d8590"
+            boot_text, boot_color = "Unknown", "#7d8a80"
         self.dash_boot_value.setText(boot_text)
         self.dash_boot_value.setStyleSheet(f"font-size:20px; color:{boot_color};")
         self.dash_boot_sub.setText(
@@ -1204,7 +1204,7 @@ class MainWindow(QMainWindow):
 
         if diag:
             self.dash_batt_value.setText(diag.battery_level)
-            self.dash_batt_value.setStyleSheet("font-size:20px; color:#3ddc84;")
+            self.dash_batt_value.setStyleSheet("font-size:20px; color:#22e583;")
             self.dash_batt_sub.setText(diag.battery_status)
         else:
             self.dash_batt_value.setText("--")
@@ -2695,7 +2695,7 @@ class MainWindow(QMainWindow):
         self.mirror_view.setAlignment(Qt.AlignCenter)
         self.mirror_view.setMinimumHeight(420)
         self.mirror_view.setStyleSheet(
-            "background:#0a0b0e; border:1px solid #22262f; border-radius:10px;"
+            "background:#060706; border:1px solid #1e241e; border-radius:10px;"
         )
         self.mirror_view.mousePressEvent = self._on_mirror_clicked
 
