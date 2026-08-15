@@ -56,7 +56,7 @@ ACTIONS: dict[str, Callable] = {
     "disable_app": lambda serial, package="", **_: packages.disable_app(serial, package),
     "push_file": lambda serial, local_path="", remote_path="", **_: file_explorer.push_file(serial, local_path, remote_path),
     "pull_file": lambda serial, remote_path="", local_path="", **_: file_explorer.pull_file(serial, remote_path, local_path),
-    "delete_file": lambda serial, remote_path="", recursive=False, **_: file_explorer.delete_remote(serial, remote_path),
+    "delete_file": lambda serial, remote_path="", **_: file_explorer.delete_remote(serial, remote_path),
     "wait": _do_wait,
 }
 

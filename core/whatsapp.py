@@ -27,32 +27,65 @@ def normalize_phone_number(phone: str) -> str:
 
 
 def build_case_status_message(case: ServiceCase) -> str:
-    """Pesan default berdasarkan status case saat ini - teknisi bisa edit
-    dulu sebelum kirim."""
-    greeting = f"Halo {case.customer_name}, ini dari Nexa Service Center."
+    """Pesan default berdasarkan status case saat ini - satu-satunya
+    sumber template pesan status, dipakai baik oleh fitur 'Notifikasi WA'
+    (buka WhatsApp langsung) maupun 'Respons ke Customer' (copy manual).
+    Sebelumnya kedua fitur ini punya template terpisah yang gampang
+    ketinggalan sinkron kalau salah satu diedit tapi yang lain tidak."""
+    name = case.customer_name or "Bapak/Ibu"
+    device_label = f"{case.manufacturer} {case.model}".strip() or "device Anda"
+    ref = f"(No. Servis: {case.case_number})"
 
-    if case.status == "Completed":
-        body = (
-            f"HP {case.manufacturer} {case.model} Anda (No. Servis "
-            f"{case.case_number}) sudah SELESAI diservis dan siap diambil. "
-            f"Terima kasih sudah menunggu."
-        )
-    elif case.status == "Cancelled":
-        body = (
-            f"Servis untuk HP Anda (No. Servis {case.case_number}) telah "
-            f"dibatalkan. Silakan hubungi kami untuk info lebih lanjut."
-        )
-    else:
-        body = (
-            f"Update status servis HP {case.manufacturer} {case.model} Anda "
-            f"(No. Servis {case.case_number}): saat ini dalam tahap "
-            f"'{case.status}'."
-        )
+    cost_line = ""
+    if case.estimated_cost:
+        cost_str = f"Rp{case.estimated_cost:,.0f}".replace(",", ".")
+        cost_line = f" Estimasi biaya: {cost_str}."
+
+    total_line = ""
+    if case.estimated_cost:
+        total_str = f"Rp{case.estimated_cost:,.0f}".replace(",", ".")
+        total_line = f" Total biaya: {total_str}."
+
+    templates = {
+        "Received": (
+            f"Halo {name}, {device_label} Anda {ref} sudah kami terima dan "
+            f"masuk antrian pengecekan. Kami akan kabari lagi setelah "
+            f"diagnosa awal selesai. Terima kasih."
+        ),
+        "Diagnosing": (
+            f"Halo {name}, {device_label} Anda {ref} sedang dalam proses "
+            f"diagnosa oleh teknisi kami. Estimasi hasil diagnosa akan kami "
+            f"informasikan segera."
+        ),
+        "Repairing": (
+            f"Halo {name}, {device_label} Anda {ref} sedang dalam proses "
+            f"perbaikan.{cost_line} Kami akan kabari begitu selesai."
+        ),
+        "Testing": (
+            f"Halo {name}, perbaikan {device_label} Anda {ref} sudah "
+            f"selesai dan sedang tahap pengujian akhir sebelum diserahkan "
+            f"kembali."
+        ),
+        "Completed": (
+            f"Halo {name}, {device_label} Anda {ref} sudah SELESAI "
+            f"diperbaiki dan siap diambil.{total_line} Ditunggu "
+            f"kedatangannya, terima kasih!"
+        ),
+        "Cancelled": (
+            f"Halo {name}, servis {device_label} Anda {ref} telah "
+            f"dibatalkan. Silakan hubungi kami jika ada pertanyaan."
+        ),
+    }
+
+    message = templates.get(
+        case.status,
+        f"Halo {name}, update untuk servis {device_label} {ref}: {case.status}.",
+    )
 
     if case.status not in ("Completed", "Cancelled") and case.estimated_completion:
-        body += f" Estimasi selesai: {case.estimated_completion}."
+        message += f" Estimasi selesai: {case.estimated_completion}."
 
-    return f"{greeting}\n\n{body}"
+    return message
 
 
 def build_whatsapp_link(phone: str, message: str) -> str:

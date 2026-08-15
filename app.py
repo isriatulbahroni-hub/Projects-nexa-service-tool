@@ -801,6 +801,10 @@ class MainWindow(QMainWindow):
             self.refresh_hardware_test_status()
         elif key == "cases":
             self.refresh_cases_table()
+            # Bug: label case_use_current_device dibuat tapi textnya
+            # tidak pernah di-set - teknisi tidak tahu device mana yang
+            # bakal otomatis ke-attach ke case baru yang dibuat.
+            self._update_case_device_hint()
         elif key == "recovery":
             self.refresh_recovery_assessment()
             self.refresh_locked_device_state()
@@ -1097,6 +1101,22 @@ class MainWindow(QMainWindow):
             return
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.dashboard_console.appendPlainText(f"[{timestamp}] {text}")
+
+    def _update_case_device_hint(self):
+        if not hasattr(self, "case_use_current_device"):
+            return
+
+        if self.current_device:
+            self.case_use_current_device.setText(
+                f"📱 Case baru akan otomatis terhubung ke device aktif: "
+                f"{self.current_device.manufacturer} {self.current_device.model} "
+                f"({self.current_device.serial})"
+            )
+        else:
+            self.case_use_current_device.setText(
+                "⚠ Tidak ada device terhubung - case akan dibuat tanpa info device "
+                "(bisa diisi manual nanti)."
+            )
 
     def refresh_dashboard_details(self):
         """Ambil status FRP + diagnostics ringkas untuk dashboard. Dipanggil
@@ -3514,46 +3534,11 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Gagal", str(exc))
             return
 
-        device_label = f"{case.manufacturer} {case.model}".strip() or "device Anda"
-        name = case.customer_name or "Bapak/Ibu"
-
-        templates = {
-            "Received": (
-                f"Halo {name}, {device_label} Anda (No. Servis: {case.case_number}) "
-                f"sudah kami terima dan masuk antrian pengecekan. Kami akan kabari "
-                f"lagi setelah diagnosa awal selesai. Terima kasih."
-            ),
-            "Diagnosing": (
-                f"Halo {name}, {device_label} Anda (No. Servis: {case.case_number}) "
-                f"sedang dalam proses diagnosa oleh teknisi kami. Estimasi hasil "
-                f"diagnosa akan kami informasikan segera."
-            ),
-            "Repairing": (
-                f"Halo {name}, {device_label} Anda (No. Servis: {case.case_number}) "
-                f"sedang dalam proses perbaikan. "
-                + (f"Estimasi biaya: Rp{case.estimated_cost:,.0f}. ".replace(",", ".") if case.estimated_cost else "")
-                + "Kami akan kabari begitu selesai."
-            ),
-            "Testing": (
-                f"Halo {name}, perbaikan {device_label} Anda (No. Servis: {case.case_number}) "
-                f"sudah selesai dan sedang tahap pengujian akhir sebelum diserahkan kembali."
-            ),
-            "Completed": (
-                f"Halo {name}, {device_label} Anda (No. Servis: {case.case_number}) "
-                f"sudah SELESAI diperbaiki dan siap diambil. "
-                + (f"Total biaya: Rp{case.estimated_cost:,.0f}. ".replace(",", ".") if case.estimated_cost else "")
-                + "Ditunggu kedatangannya, terima kasih!"
-            ),
-            "Cancelled": (
-                f"Halo {name}, servis {device_label} Anda (No. Servis: {case.case_number}) "
-                f"telah dibatalkan. Silakan hubungi kami jika ada pertanyaan."
-            ),
-        }
-
-        message = templates.get(
-            case.status,
-            f"Halo {name}, update untuk servis {device_label} (No. Servis: {case.case_number}): {case.status}.",
-        )
+        # Pakai build_case_status_message() yang sama dengan fitur
+        # 'Notifikasi WA' - sebelumnya function ini punya dict template
+        # terpisah sendiri yang gampang tidak sinkron kalau salah satu
+        # diedit tapi yang lain tidak.
+        message = build_case_status_message(case)
 
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Respons untuk {case.customer_name} ({case.case_number})")
@@ -5554,6 +5539,7 @@ class MainWindow(QMainWindow):
             self.bootloader_button.setEnabled(True)
 
             self.refresh_dashboard_details()
+            self._update_case_device_hint()
 
         except ADBError as exc:
             self._set_no_device(str(exc))
@@ -5570,6 +5556,7 @@ class MainWindow(QMainWindow):
         self.reboot_button.setEnabled(False)
         self.recovery_button.setEnabled(False)
         self.bootloader_button.setEnabled(False)
+        self._update_case_device_hint()
 
     # ------------------------------------------------------------------
     # Cleanup
