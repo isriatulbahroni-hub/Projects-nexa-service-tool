@@ -115,9 +115,19 @@ from core.service_cases import (
     add_photo as add_case_photo_db,
     get_photos as get_case_photos_db,
     delete_photo as delete_case_photo_db,
+    get_business_summary,
+    export_cases_csv,
 )
 from core.invoice import generate_case_invoice, generate_case_label
 from core.whatsapp import build_whatsapp_link, build_case_status_message
+from core.parts import (
+    add_part,
+    list_parts,
+    update_stock,
+    use_part,
+    delete_part,
+    get_usage_for_case,
+)
 from core.recovery_actions import assess_access, factory_reset_guidance
 from core.device_access_recovery import diagnose_access_issue
 from core.locked_device_recovery import (
@@ -569,6 +579,8 @@ class MainWindow(QMainWindow):
             ("hardware", "Hardware Test"),
             ("smart", "Smart Diagnosis"),
             ("cases", "Service Cases"),
+            ("reports", "Laporan Bisnis"),
+            ("parts", "Stok Sparepart"),
             ("recovery", "Recovery Assistant"),
             ("reset", "Factory Reset"),
             ("automation", "Automation"),
@@ -609,6 +621,8 @@ class MainWindow(QMainWindow):
         self.hardware_page = self.create_hardware_test_page()
         self.smart_page = self.create_smart_diagnosis_page()
         self.cases_page = self.create_service_cases_page()
+        self.reports_page = self.create_reports_page()
+        self.parts_page = self.create_parts_page()
         self.recovery_page = self.create_recovery_page()
         self.reset_page = self.create_factory_reset_page()
         self.automation_page = self.create_automation_page()
@@ -629,6 +643,8 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.hardware_page)
         self.pages.addWidget(self.smart_page)
         self.pages.addWidget(self.cases_page)
+        self.pages.addWidget(self.reports_page)
+        self.pages.addWidget(self.parts_page)
         self.pages.addWidget(self.recovery_page)
         self.pages.addWidget(self.reset_page)
         self.pages.addWidget(self.automation_page)
@@ -650,6 +666,8 @@ class MainWindow(QMainWindow):
             "hardware": self.hardware_page,
             "smart": self.smart_page,
             "cases": self.cases_page,
+            "reports": self.reports_page,
+            "parts": self.parts_page,
             "recovery": self.recovery_page,
             "reset": self.reset_page,
             "automation": self.automation_page,
@@ -779,6 +797,13 @@ class MainWindow(QMainWindow):
         self.sidebar_toggle_button.setText("☰" if self._sidebar_collapsed else "✕")
 
     def switch_page(self, key: str):
+        # PIN gate - halaman Settings bisa dikunci PIN supaya nama teknisi
+        # aktif (dasar audit trail) tidak bisa diganti sembarangan tanpa
+        # otentikasi oleh siapapun yang kebetulan pegang laptop servis.
+        if key == "settings" and self.settings.has_pin():
+            if not self._prompt_settings_pin():
+                return
+
         for k, btn in self.nav_buttons.items():
             btn.setChecked(k == key)
 
@@ -824,6 +849,10 @@ class MainWindow(QMainWindow):
             # tidak pernah di-set - teknisi tidak tahu device mana yang
             # bakal otomatis ke-attach ke case baru yang dibuat.
             self._update_case_device_hint()
+        elif key == "reports":
+            self.refresh_business_report()
+        elif key == "parts":
+            self.refresh_parts_table()
         elif key == "recovery":
             self.refresh_recovery_assessment()
             self.refresh_locked_device_state()
@@ -3419,7 +3448,7 @@ class MainWindow(QMainWindow):
 
         filter_row = QHBoxLayout()
         self.case_search = QLineEdit()
-        self.case_search.setPlaceholderText("Cari nama customer / case number...")
+        self.case_search.setPlaceholderText("Cari nama / no. HP / case number / IMEI...")
         self.case_status_filter = QComboBox()
         self.case_status_filter.setObjectName("deviceSelector")
         self.case_status_filter.addItem("Semua Status")
@@ -4038,6 +4067,395 @@ class MainWindow(QMainWindow):
     # core/recovery_actions.py, core/device_access_recovery.py, and
     # core/locked_device_recovery.py.
     # ------------------------------------------------------------------
+
+    def create_reports_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(16)
+
+        layout.addLayout(self._page_header(
+            "Laporan Bisnis",
+            "Ringkasan jumlah case, pendapatan, dan sisa tagihan untuk periode tertentu."
+        ))
+
+        filter_card, filter_layout = self._card_panel("Periode")
+
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(8)
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        month_start = datetime.now().replace(day=1).strftime("%Y-%m-%d")
+
+        self.report_start_date = QLineEdit(month_start)
+        self.report_start_date.setPlaceholderText("YYYY-MM-DD")
+        self.report_end_date = QLineEdit(today)
+        self.report_end_date.setPlaceholderText("YYYY-MM-DD")
+
+        filter_row.addWidget(QLabel("Dari"))
+        filter_row.addWidget(self.report_start_date)
+        filter_row.addWidget(QLabel("Sampai"))
+        filter_row.addWidget(self.report_end_date)
+
+        self.report_refresh_button = QPushButton("🔄 Tampilkan")
+        self.report_refresh_button.setObjectName("actionPrimary")
+        self.report_refresh_button.clicked.connect(self.refresh_business_report)
+        filter_row.addWidget(self.report_refresh_button)
+
+        quick_today_button = QPushButton("Hari Ini")
+        quick_today_button.setObjectName("action")
+        quick_today_button.clicked.connect(self._report_set_range_today)
+        quick_month_button = QPushButton("Bulan Ini")
+        quick_month_button.setObjectName("action")
+        quick_month_button.clicked.connect(self._report_set_range_month)
+        filter_row.addWidget(quick_today_button)
+        filter_row.addWidget(quick_month_button)
+
+        filter_layout.addLayout(filter_row)
+        layout.addWidget(filter_card)
+
+        # Stat cards
+        stats_row = QHBoxLayout()
+        stats_row.setSpacing(14)
+
+        def make_stat_card(title_text: str):
+            card = QFrame()
+            card.setObjectName("card")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(18, 16, 18, 16)
+            card_layout.setSpacing(4)
+            label = QLabel(title_text)
+            label.setObjectName("muted")
+            value = QLabel("--")
+            value.setObjectName("status")
+            value.setStyleSheet("font-size:22px;")
+            card_layout.addWidget(label)
+            card_layout.addWidget(value)
+            return card, value
+
+        total_card, self.report_total_cases_value = make_stat_card("TOTAL CASE")
+        completed_card, self.report_completed_value = make_stat_card("SELESAI")
+        revenue_card, self.report_revenue_value = make_stat_card("PENDAPATAN (SUDAH DIBAYAR)")
+        outstanding_card, self.report_outstanding_value = make_stat_card("SISA TAGIHAN")
+
+        for card in (total_card, completed_card, revenue_card, outstanding_card):
+            stats_row.addWidget(card, 1)
+
+        layout.addLayout(stats_row)
+
+        detail_card, detail_layout = self._card_panel("Detail")
+
+        self.report_detail_label = QLabel("Pilih periode lalu klik Tampilkan.")
+        self.report_detail_label.setObjectName("value")
+        self.report_detail_label.setWordWrap(True)
+        detail_layout.addWidget(self.report_detail_label)
+
+        self.report_status_table = QTableWidget(0, 2)
+        self.report_status_table.setHorizontalHeaderLabels(["Status", "Jumlah"])
+        self.report_status_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.report_status_table.horizontalHeader().setStretchLastSection(True)
+        self.report_status_table.setMinimumHeight(180)
+        detail_layout.addWidget(self.report_status_table)
+
+        export_button = QPushButton("📊 Export Semua Case ke CSV (untuk Excel)")
+        export_button.setObjectName("action")
+        export_button.clicked.connect(self.export_cases_to_csv)
+        detail_layout.addWidget(export_button)
+
+        layout.addWidget(detail_card)
+        layout.addStretch()
+
+        return page
+
+    def _report_set_range_today(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        self.report_start_date.setText(today)
+        self.report_end_date.setText(today)
+        self.refresh_business_report()
+
+    def _report_set_range_month(self):
+        month_start = datetime.now().replace(day=1).strftime("%Y-%m-%d")
+        today = datetime.now().strftime("%Y-%m-%d")
+        self.report_start_date.setText(month_start)
+        self.report_end_date.setText(today)
+        self.refresh_business_report()
+
+    def refresh_business_report(self):
+        start = self.report_start_date.text().strip()
+        end = self.report_end_date.text().strip()
+
+        try:
+            datetime.fromisoformat(start)
+            datetime.fromisoformat(end)
+        except ValueError:
+            QMessageBox.warning(
+                self, "Tanggal Tidak Valid", "Format tanggal harus YYYY-MM-DD."
+            )
+            return
+
+        try:
+            summary = get_business_summary(start, end)
+        except Exception as exc:
+            QMessageBox.critical(self, "Gagal Memuat Laporan", str(exc))
+            return
+
+        self.report_total_cases_value.setText(str(summary.total_cases))
+        self.report_completed_value.setText(str(summary.completed_cases))
+        self.report_revenue_value.setText(f"Rp {summary.total_revenue:,.0f}".replace(",", "."))
+        self.report_outstanding_value.setText(
+            f"Rp {summary.outstanding_balance:,.0f}".replace(",", ".")
+        )
+
+        turnaround_text = (
+            f"{summary.avg_turnaround_hours:.1f} jam"
+            if summary.avg_turnaround_hours is not None
+            else "belum ada case selesai di periode ini"
+        )
+        self.report_detail_label.setText(
+            f"Periode: {summary.period_label}\n"
+            f"Case dibatalkan: {summary.cancelled_cases}\n"
+            f"Rata-rata waktu pengerjaan (case selesai): {turnaround_text}"
+        )
+
+        self.report_status_table.setRowCount(len(summary.status_breakdown))
+        for row, (status, count) in enumerate(summary.status_breakdown.items()):
+            self.report_status_table.setItem(row, 0, QTableWidgetItem(status))
+            self.report_status_table.setItem(row, 1, QTableWidgetItem(str(count)))
+
+    def export_cases_to_csv(self):
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Export Case ke CSV", "service_cases_export.csv", "CSV Files (*.csv)"
+        )
+        if not file_path:
+            return
+
+        try:
+            export_cases_csv(Path(file_path))
+            self.log_action("Export CSV Cases", detail=file_path, status="OK")
+            QDesktopServices.openUrl(QUrl.fromLocalFile(file_path))
+        except Exception as exc:
+            QMessageBox.critical(self, "Gagal Export", str(exc))
+
+    def create_parts_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(16)
+
+        layout.addLayout(self._page_header(
+            "Stok Sparepart", "Kelola stok part (LCD, baterai, konektor, dll) dan catat pemakaiannya per case."
+        ))
+
+        form_card, form_layout = self._card_panel("Tambah Part Baru")
+
+        self.part_name_input = QLineEdit()
+        self.part_name_input.setPlaceholderText("Nama part (mis: LCD Redmi Note 10) *")
+        self.part_category_input = QLineEdit()
+        self.part_category_input.setPlaceholderText("Kategori (mis: LCD, Baterai, Konektor)")
+        self.part_stock_input = QLineEdit()
+        self.part_stock_input.setPlaceholderText("Stok awal")
+        self.part_min_stock_input = QLineEdit()
+        self.part_min_stock_input.setPlaceholderText("Stok minimum (peringatan kalau di bawah ini)")
+        self.part_price_input = QLineEdit()
+        self.part_price_input.setPlaceholderText("Harga satuan (Rp)")
+
+        for widget in (
+            self.part_name_input, self.part_category_input, self.part_stock_input,
+            self.part_min_stock_input, self.part_price_input,
+        ):
+            form_layout.addWidget(widget)
+
+        add_part_button = QPushButton("➕ Tambah Part")
+        add_part_button.setObjectName("actionPrimary")
+        add_part_button.clicked.connect(self.add_new_part)
+        form_layout.addWidget(add_part_button)
+
+        layout.addWidget(form_card)
+
+        list_card, list_layout = self._card_panel("Daftar Stok")
+
+        filter_row = QHBoxLayout()
+        self.part_search = QLineEdit()
+        self.part_search.setPlaceholderText("Cari nama/kategori part...")
+        self.part_search.textChanged.connect(self.refresh_parts_table)
+        self.part_low_stock_only = QPushButton("⚠ Stok Menipis Saja")
+        self.part_low_stock_only.setObjectName("action")
+        self.part_low_stock_only.setCheckable(True)
+        self.part_low_stock_only.clicked.connect(self.refresh_parts_table)
+        refresh_parts_button = QPushButton("🔄 Refresh")
+        refresh_parts_button.setObjectName("action")
+        refresh_parts_button.clicked.connect(self.refresh_parts_table)
+        filter_row.addWidget(self.part_search, 1)
+        filter_row.addWidget(self.part_low_stock_only)
+        filter_row.addWidget(refresh_parts_button)
+        list_layout.addLayout(filter_row)
+
+        self.parts_table = QTableWidget(0, 6)
+        self.parts_table.setHorizontalHeaderLabels(
+            ["Nama Part", "Kategori", "Stok", "Min. Stok", "Harga Satuan", "Updated"]
+        )
+        self.parts_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.parts_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.parts_table.horizontalHeader().setStretchLastSection(True)
+        self.parts_table.setMinimumHeight(260)
+        list_layout.addWidget(self.parts_table)
+
+        action_row = QHBoxLayout()
+        restock_button = QPushButton("📦 Restock (Set Stok Baru)")
+        restock_button.setObjectName("action")
+        restock_button.clicked.connect(self.restock_selected_part)
+        use_button = QPushButton("🔧 Pakai Part (untuk Case)")
+        use_button.setObjectName("action")
+        use_button.clicked.connect(self.use_selected_part)
+        delete_button = QPushButton("🗑 Hapus Part")
+        delete_button.setObjectName("actionDanger")
+        delete_button.clicked.connect(self.delete_selected_part)
+        action_row.addWidget(restock_button)
+        action_row.addWidget(use_button)
+        action_row.addWidget(delete_button)
+        list_layout.addLayout(action_row)
+
+        layout.addWidget(list_card)
+        layout.addStretch()
+
+        return page
+
+    def _selected_part_id(self) -> int | None:
+        row = self.parts_table.currentRow()
+        if row < 0:
+            return None
+        item = self.parts_table.item(row, 0)
+        return item.data(Qt.UserRole) if item else None
+
+    def refresh_parts_table(self):
+        search = self.part_search.text().strip()
+        low_stock_only = self.part_low_stock_only.isChecked()
+
+        try:
+            parts = list_parts(search=search, low_stock_only=low_stock_only)
+        except Exception as exc:
+            logger.error("Gagal memuat daftar sparepart: %s", exc)
+            return
+
+        self.parts_table.setRowCount(len(parts))
+        for row, part in enumerate(parts):
+            is_low = part.stock_qty <= part.min_stock
+            values = [
+                part.name, part.category or "-", str(part.stock_qty),
+                str(part.min_stock), f"Rp {part.unit_price:,.0f}".replace(",", "."),
+                part.updated_at,
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setData(Qt.UserRole, part.id)
+                if is_low:
+                    item.setForeground(QColor("#ffb020"))
+                self.parts_table.setItem(row, col, item)
+
+    def add_new_part(self):
+        name = self.part_name_input.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Nama Kosong", "Nama part wajib diisi.")
+            return
+
+        try:
+            stock = int(self.part_stock_input.text().strip() or "0")
+            min_stock = int(self.part_min_stock_input.text().strip() or "0")
+            price = float(self.part_price_input.text().strip() or "0")
+        except ValueError:
+            QMessageBox.warning(self, "Input Tidak Valid", "Stok/harga harus berupa angka.")
+            return
+
+        try:
+            add_part(
+                name, category=self.part_category_input.text().strip(),
+                stock_qty=stock, min_stock=min_stock, unit_price=price,
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Gagal Menambah Part", str(exc))
+            return
+
+        for widget in (
+            self.part_name_input, self.part_category_input, self.part_stock_input,
+            self.part_min_stock_input, self.part_price_input,
+        ):
+            widget.clear()
+
+        self.refresh_parts_table()
+
+    def restock_selected_part(self):
+        part_id = self._selected_part_id()
+        if part_id is None:
+            QMessageBox.warning(self, "Pilih Part", "Pilih part dari daftar dulu.")
+            return
+
+        qty_text, ok = QInputDialog.getText(
+            self, "Restock", "Masukkan jumlah stok BARU (bukan tambahan):"
+        )
+        if not ok:
+            return
+
+        try:
+            new_qty = int(qty_text.strip())
+        except ValueError:
+            QMessageBox.warning(self, "Input Tidak Valid", "Jumlah harus berupa angka.")
+            return
+
+        try:
+            update_stock(part_id, new_qty)
+            self.log_action("Restock Part", detail=f"Part #{part_id} -> {new_qty}", status="OK")
+            self.refresh_parts_table()
+        except (ValueError, KeyError) as exc:
+            QMessageBox.critical(self, "Gagal Restock", str(exc))
+
+    def use_selected_part(self):
+        part_id = self._selected_part_id()
+        if part_id is None:
+            QMessageBox.warning(self, "Pilih Part", "Pilih part dari daftar dulu.")
+            return
+
+        qty_text, ok = QInputDialog.getText(self, "Pakai Part", "Jumlah yang dipakai:")
+        if not ok:
+            return
+
+        try:
+            qty = int(qty_text.strip())
+        except ValueError:
+            QMessageBox.warning(self, "Input Tidak Valid", "Jumlah harus berupa angka.")
+            return
+
+        case_id = None
+        case_id_text, ok = QInputDialog.getText(
+            self, "Case (Opsional)",
+            "ID case terkait (kosongkan kalau tidak terkait case tertentu):",
+        )
+        if ok and case_id_text.strip():
+            try:
+                case_id = int(case_id_text.strip())
+            except ValueError:
+                QMessageBox.warning(self, "Case ID Tidak Valid", "ID case harus berupa angka.")
+                return
+
+        try:
+            use_part(part_id, qty, case_id=case_id)
+            self.log_action("Pakai Sparepart", detail=f"Part #{part_id} x{qty} (case #{case_id or '-'})", status="OK")
+            self.refresh_parts_table()
+        except (ValueError, KeyError) as exc:
+            QMessageBox.critical(self, "Gagal", str(exc))
+
+    def delete_selected_part(self):
+        part_id = self._selected_part_id()
+        if part_id is None:
+            QMessageBox.warning(self, "Pilih Part", "Pilih part dari daftar dulu.")
+            return
+
+        reply = QMessageBox.question(
+            self, "Konfirmasi", "Hapus part ini dari daftar stok?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            delete_part(part_id)
+            self.refresh_parts_table()
 
     def create_recovery_page(self):
         page = QWidget()
@@ -5090,6 +5508,30 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(tools_card)
 
+        # ------------------------------------------------------------
+        # Keamanan - PIN untuk kunci halaman Settings, supaya nama
+        # teknisi aktif (dasar audit trail) tidak bisa diganti sembarangan
+        # tanpa otentikasi oleh siapapun yang kebetulan pegang laptop.
+        # ------------------------------------------------------------
+        security_card, security_layout = self._card_panel("Keamanan")
+
+        self.settings_pin_status = QLabel("")
+        self.settings_pin_status.setObjectName("muted")
+        security_layout.addWidget(self.settings_pin_status)
+
+        pin_btn_row = QHBoxLayout()
+        self.settings_set_pin_button = QPushButton("🔒 Set/Ubah PIN")
+        self.settings_set_pin_button.setObjectName("action")
+        self.settings_set_pin_button.clicked.connect(self.change_settings_pin)
+        self.settings_remove_pin_button = QPushButton("🔓 Hapus PIN")
+        self.settings_remove_pin_button.setObjectName("actionDanger")
+        self.settings_remove_pin_button.clicked.connect(self.remove_settings_pin)
+        pin_btn_row.addWidget(self.settings_set_pin_button)
+        pin_btn_row.addWidget(self.settings_remove_pin_button)
+        security_layout.addLayout(pin_btn_row)
+
+        layout.addWidget(security_card)
+
         self.settings_save_button = QPushButton("Simpan Settings")
         self.settings_save_button.setObjectName("actionPrimary")
         self.settings_save_button.clicked.connect(self.save_settings_form)
@@ -5097,6 +5539,79 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
         return page
+
+    def _prompt_settings_pin(self) -> bool:
+        pin, ok = QInputDialog.getText(
+            self, "PIN Diperlukan", "Masukkan PIN untuk membuka Settings:",
+            QLineEdit.Password,
+        )
+        if not ok:
+            return False
+        if self.settings.verify_pin(pin):
+            return True
+        QMessageBox.warning(self, "PIN Salah", "PIN yang dimasukkan salah.")
+        return False
+
+    def change_settings_pin(self):
+        if self.settings.has_pin():
+            old_pin, ok = QInputDialog.getText(
+                self, "Verifikasi PIN Lama", "Masukkan PIN lama:", QLineEdit.Password
+            )
+            if not ok:
+                return
+            if not self.settings.verify_pin(old_pin):
+                QMessageBox.warning(self, "PIN Salah", "PIN lama tidak cocok.")
+                return
+
+        new_pin, ok = QInputDialog.getText(
+            self, "PIN Baru", "Masukkan PIN baru (minimal 4 digit):", QLineEdit.Password
+        )
+        if not ok:
+            return
+        if len(new_pin.strip()) < 4:
+            QMessageBox.warning(self, "PIN Terlalu Pendek", "PIN minimal 4 karakter.")
+            return
+
+        confirm_pin, ok = QInputDialog.getText(
+            self, "Konfirmasi PIN", "Masukkan ulang PIN baru:", QLineEdit.Password
+        )
+        if not ok:
+            return
+        if confirm_pin != new_pin:
+            QMessageBox.warning(self, "PIN Tidak Cocok", "Konfirmasi PIN tidak sama.")
+            return
+
+        self.settings.set_pin(new_pin.strip())
+        self._update_pin_status_label()
+        QMessageBox.information(self, "PIN Disimpan", "PIN halaman Settings berhasil diatur.")
+
+    def remove_settings_pin(self):
+        if not self.settings.has_pin():
+            QMessageBox.information(self, "Tidak Ada PIN", "Belum ada PIN yang diatur.")
+            return
+
+        old_pin, ok = QInputDialog.getText(
+            self, "Verifikasi PIN", "Masukkan PIN saat ini untuk menghapusnya:", QLineEdit.Password
+        )
+        if not ok:
+            return
+        if not self.settings.verify_pin(old_pin):
+            QMessageBox.warning(self, "PIN Salah", "PIN tidak cocok.")
+            return
+
+        self.settings.clear_pin()
+        self._update_pin_status_label()
+        QMessageBox.information(self, "PIN Dihapus", "Halaman Settings tidak lagi terkunci PIN.")
+
+    def _update_pin_status_label(self):
+        if not hasattr(self, "settings_pin_status"):
+            return
+        if self.settings.has_pin():
+            self.settings_pin_status.setText("🔒 Halaman Settings saat ini TERKUNCI PIN.")
+        else:
+            self.settings_pin_status.setText(
+                "🔓 Halaman Settings belum dikunci PIN - siapapun bisa mengubah preferensi."
+            )
 
     def _browse_tool_path(self, line_edit: QLineEdit, tool_name: str):
         filter_str = "Executable (*.exe);;All Files (*)" if sys.platform == "win32" else "All Files (*)"
@@ -5152,6 +5667,7 @@ class MainWindow(QMainWindow):
         )
 
     def load_settings_form(self):
+        self._update_pin_status_label()
         self.settings_refresh_ms.setText(str(self.settings.get("auto_refresh_ms", 1500)))
 
         log_level = self.settings.get("log_level", "INFO")

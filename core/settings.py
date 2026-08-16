@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import secrets
 from pathlib import Path
 from threading import RLock
 from typing import Any
@@ -26,6 +28,12 @@ DEFAULTS: dict[str, Any] = {
     # Path adb/fastboot manual, kalau auto-detect (PATH/ToolRouter) gagal.
     "adb_path_override": "",
     "fastboot_path_override": "",
+    # PIN untuk kunci halaman Settings - supaya nama teknisi (yang jadi
+    # dasar audit trail) tidak bisa diganti sembarangan tanpa otentikasi
+    # oleh siapapun yang kebetulan pegang laptop. Disimpan sebagai hash
+    # PBKDF2 + salt acak, BUKAN plaintext.
+    "settings_pin_salt": "",
+    "settings_pin_hash": "",
 }
 
 
@@ -89,3 +97,32 @@ class SettingsStore:
                 encoding="utf-8",
             )
             tmp.replace(self.path)
+
+    # ------------------------------------------------------------------
+    # PIN untuk kunci halaman Settings
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _hash_pin(pin: str, salt: str) -> str:
+        return hashlib.pbkdf2_hmac(
+            "sha256", pin.encode("utf-8"), bytes.fromhex(salt), 100_000
+        ).hex()
+
+    def has_pin(self) -> bool:
+        return bool(self.get("settings_pin_hash", ""))
+
+    def set_pin(self, pin: str) -> None:
+        salt = secrets.token_hex(16)
+        self.update({
+            "settings_pin_salt": salt,
+            "settings_pin_hash": self._hash_pin(pin, salt),
+        })
+
+    def clear_pin(self) -> None:
+        self.update({"settings_pin_salt": "", "settings_pin_hash": ""})
+
+    def verify_pin(self, pin: str) -> bool:
+        salt = self.get("settings_pin_salt", "")
+        stored_hash = self.get("settings_pin_hash", "")
+        if not salt or not stored_hash:
+            return False
+        return self._hash_pin(pin, salt) == stored_hash

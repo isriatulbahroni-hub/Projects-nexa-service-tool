@@ -48,8 +48,8 @@ def test_scroll_resets_across_all_pages(main_window):
     keys = [
         "dashboard", "device", "diagnostics", "security", "apps", "files",
         "mirror", "backup", "network", "logs", "history", "firmware",
-        "hardware", "smart", "cases", "recovery", "reset", "automation",
-        "settings",
+        "hardware", "smart", "cases", "reports", "parts", "recovery",
+        "reset", "automation", "settings",
     ]
 
     for key in keys:

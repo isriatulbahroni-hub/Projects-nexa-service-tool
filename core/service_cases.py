@@ -209,8 +209,11 @@ def list_cases(status: str | None = None, search: str = "", limit: int = 200) ->
             params.append(status)
         if search.strip():
             like = f"%{search.strip()}%"
-            clauses.append("(case_number LIKE ? OR customer_name LIKE ? OR device_serial LIKE ? OR imei LIKE ? OR model LIKE ?)")
-            params.extend([like] * 5)
+            clauses.append(
+                "(case_number LIKE ? OR customer_name LIKE ? OR customer_phone LIKE ? "
+                "OR device_serial LIKE ? OR imei LIKE ? OR model LIKE ?)"
+            )
+            params.extend([like] * 6)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = conn.execute(
             f"SELECT * FROM service_cases {where} ORDER BY updated_at DESC LIMIT ?",
@@ -382,3 +385,110 @@ def delete_photo(photo_id: int) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+@dataclass(frozen=True)
+class BusinessSummary:
+    period_label: str
+    total_cases: int
+    completed_cases: int
+    cancelled_cases: int
+    total_revenue: float
+    outstanding_balance: float
+    avg_turnaround_hours: float | None
+    status_breakdown: dict[str, int]
+
+
+def get_business_summary(start_date: str, end_date: str) -> BusinessSummary:
+    """Ringkasan bisnis untuk rentang tanggal (format 'YYYY-MM-DD') -
+    dipakai halaman Laporan supaya pemilik konter bisa lihat jumlah case,
+    pendapatan, dan sisa tagihan tanpa harus hitung manual dari daftar
+    case satu-satu."""
+    init_service_cases()
+    conn = _connection()
+    try:
+        rows = conn.execute(
+            """SELECT status, estimated_cost, paid_amount, created_at, updated_at
+            FROM service_cases
+            WHERE date(created_at) >= date(?) AND date(created_at) <= date(?)""",
+            (start_date, end_date),
+        ).fetchall()
+
+        total_cases = len(rows)
+        completed = sum(1 for r in rows if r["status"] == "Completed")
+        cancelled = sum(1 for r in rows if r["status"] == "Cancelled")
+        total_revenue = sum(r["paid_amount"] for r in rows)
+        outstanding = sum(
+            max(0.0, r["estimated_cost"] - r["paid_amount"])
+            for r in rows if r["status"] not in ("Cancelled",)
+        )
+
+        breakdown: dict[str, int] = {status: 0 for status in STATUSES}
+        for r in rows:
+            breakdown[r["status"]] = breakdown.get(r["status"], 0) + 1
+
+        turnaround_hours = []
+        for r in rows:
+            if r["status"] != "Completed":
+                continue
+            try:
+                created = datetime.fromisoformat(r["created_at"][:19])
+                updated = datetime.fromisoformat(r["updated_at"][:19])
+                turnaround_hours.append((updated - created).total_seconds() / 3600)
+            except ValueError:
+                continue
+
+        avg_turnaround = (
+            sum(turnaround_hours) / len(turnaround_hours) if turnaround_hours else None
+        )
+
+        return BusinessSummary(
+            period_label=f"{start_date} s/d {end_date}",
+            total_cases=total_cases,
+            completed_cases=completed,
+            cancelled_cases=cancelled,
+            total_revenue=total_revenue,
+            outstanding_balance=outstanding,
+            avg_turnaround_hours=avg_turnaround,
+            status_breakdown=breakdown,
+        )
+    finally:
+        conn.close()
+
+
+def export_cases_csv(output_path, start_date: str = "", end_date: str = "") -> Path:
+    """Export semua case (opsional difilter rentang tanggal) ke CSV untuk
+    dibuka di Excel/Google Sheets - kebutuhan pembukuan/laporan pajak yang
+    sebelumnya cuma bisa dilihat manual di aplikasi atau per-case PDF."""
+    import csv as csv_module
+
+    init_service_cases()
+    conn = _connection()
+    try:
+        query = "SELECT * FROM service_cases"
+        params: list[object] = []
+        if start_date and end_date:
+            query += " WHERE date(created_at) >= date(?) AND date(created_at) <= date(?)"
+            params = [start_date, end_date]
+        query += " ORDER BY created_at ASC"
+        rows = conn.execute(query, params).fetchall()
+    finally:
+        conn.close()
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fieldnames = [
+        "case_number", "customer_name", "customer_phone", "device_serial", "imei",
+        "manufacturer", "model", "complaint", "technician", "status",
+        "estimated_cost", "payment_status", "paid_amount", "estimated_completion",
+        "notes", "created_at", "updated_at",
+    ]
+
+    with output_path.open("w", newline="", encoding="utf-8-sig") as f:
+        writer = csv_module.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row[k] for k in fieldnames})
+
+    return output_path
