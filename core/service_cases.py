@@ -339,6 +339,66 @@ def update_estimated_completion(case_id: int, estimated_completion: str) -> Serv
         conn.close()
 
 
+def update_case_info(
+    case_id: int,
+    customer_name: str | None = None,
+    customer_phone: str | None = None,
+    complaint: str | None = None,
+    imei: str | None = None,
+) -> ServiceCase:
+    """Perbaiki data dasar case yang salah ketik saat input awal (nama,
+    no. HP, keluhan, IMEI) - sebelumnya cuma bisa update status/pembayaran/
+    catatan tambahan, tidak ada cara membetulkan data awal yang salah."""
+    init_service_cases()
+    now = datetime.now().isoformat(timespec="seconds")
+    conn = _connection()
+    try:
+        row = conn.execute(
+            "SELECT customer_name, customer_phone, complaint, imei FROM service_cases WHERE id = ?",
+            (case_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"service case {case_id} not found")
+
+        new_name = customer_name.strip() if customer_name is not None else row["customer_name"]
+        new_phone = customer_phone.strip() if customer_phone is not None else row["customer_phone"]
+        new_complaint = complaint.strip() if complaint is not None else row["complaint"]
+        new_imei = imei.strip() if imei is not None else row["imei"]
+
+        if not new_name:
+            raise ValueError("Nama customer tidak boleh kosong.")
+        if not new_complaint:
+            raise ValueError("Keluhan tidak boleh kosong.")
+
+        changes = []
+        if new_name != row["customer_name"]:
+            changes.append(f"nama: '{row['customer_name']}' -> '{new_name}'")
+        if new_phone != row["customer_phone"]:
+            changes.append(f"HP: '{row['customer_phone']}' -> '{new_phone}'")
+        if new_complaint != row["complaint"]:
+            changes.append(f"keluhan: '{row['complaint']}' -> '{new_complaint}'")
+        if new_imei != row["imei"]:
+            changes.append(f"IMEI: '{row['imei']}' -> '{new_imei}'")
+
+        conn.execute(
+            """UPDATE service_cases
+            SET customer_name = ?, customer_phone = ?, complaint = ?, imei = ?, updated_at = ?
+            WHERE id = ?""",
+            (new_name, new_phone, new_complaint, new_imei, now, case_id),
+        )
+
+        if changes:
+            conn.execute(
+                "INSERT INTO service_case_events (case_id, event_type, note, created_at) VALUES (?, 'edit', ?, ?)",
+                (case_id, "; ".join(changes), now),
+            )
+
+        conn.commit()
+        return get_case(case_id)
+    finally:
+        conn.close()
+
+
 def add_photo(case_id: int, photo_path: str, caption: str = "") -> CasePhoto:
     init_service_cases()
     now = datetime.now().isoformat(timespec="seconds")
@@ -397,6 +457,7 @@ class BusinessSummary:
     outstanding_balance: float
     avg_turnaround_hours: float | None
     status_breakdown: dict[str, int]
+    technician_breakdown: dict[str, dict[str, float]]
 
 
 def get_business_summary(start_date: str, end_date: str) -> BusinessSummary:
@@ -408,7 +469,7 @@ def get_business_summary(start_date: str, end_date: str) -> BusinessSummary:
     conn = _connection()
     try:
         rows = conn.execute(
-            """SELECT status, estimated_cost, paid_amount, created_at, updated_at
+            """SELECT status, technician, estimated_cost, paid_amount, created_at, updated_at
             FROM service_cases
             WHERE date(created_at) >= date(?) AND date(created_at) <= date(?)""",
             (start_date, end_date),
@@ -426,6 +487,20 @@ def get_business_summary(start_date: str, end_date: str) -> BusinessSummary:
         breakdown: dict[str, int] = {status: 0 for status in STATUSES}
         for r in rows:
             breakdown[r["status"]] = breakdown.get(r["status"], 0) + 1
+
+        # Breakdown per teknisi - berguna kalau konter sudah punya lebih
+        # dari 1 teknisi, supaya kelihatan siapa yang paling banyak
+        # menyelesaikan case dan kontribusi pendapatannya masing-masing.
+        technician_breakdown: dict[str, dict[str, float]] = {}
+        for r in rows:
+            name = r["technician"].strip() if r["technician"] and r["technician"].strip() else "(Belum diisi)"
+            entry = technician_breakdown.setdefault(
+                name, {"total_cases": 0, "completed_cases": 0, "revenue": 0.0}
+            )
+            entry["total_cases"] += 1
+            if r["status"] == "Completed":
+                entry["completed_cases"] += 1
+            entry["revenue"] += r["paid_amount"]
 
         turnaround_hours = []
         for r in rows:
@@ -451,6 +526,7 @@ def get_business_summary(start_date: str, end_date: str) -> BusinessSummary:
             outstanding_balance=outstanding,
             avg_turnaround_hours=avg_turnaround,
             status_breakdown=breakdown,
+            technician_breakdown=technician_breakdown,
         )
     finally:
         conn.close()

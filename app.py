@@ -117,6 +117,7 @@ from core.service_cases import (
     delete_photo as delete_case_photo_db,
     get_business_summary,
     export_cases_csv,
+    update_case_info as update_case_info_db,
 )
 from core.invoice import generate_case_invoice, generate_case_label
 from core.whatsapp import build_whatsapp_link, build_case_status_message
@@ -127,6 +128,15 @@ from core.parts import (
     use_part,
     delete_part,
     get_usage_for_case,
+    get_total_usage_cost,
+)
+from core.db_backup import (
+    backup_app_database,
+    should_auto_backup,
+    cleanup_old_app_backups,
+    restore_app_database,
+    get_last_backup_time,
+    DEFAULT_BACKUP_DIR as APP_DB_BACKUP_DIR,
 )
 from core.recovery_actions import assess_access, factory_reset_guidance
 from core.device_access_recovery import diagnose_access_issue
@@ -445,11 +455,32 @@ class MainWindow(QMainWindow):
         self.refresh_device_list()
         logger.info("Nexa Service Tool started")
 
+        # Auto-backup database aplikasi sendiri (case, pembayaran, stok
+        # sparepart, audit trail) - diam-diam di background, maks 1x per
+        # 24 jam supaya tidak nge-spam backup tiap kali app dibuka. Ini
+        # BEDA dari 'Backup Device' yang itu buat data HP pelanggan -
+        # ini buat data BISNIS teknisi sendiri, yang kalau hilang (laptop
+        # rusak/kena virus) tidak ada cara mengembalikannya sama sekali
+        # tanpa backup ini.
+        QTimer.singleShot(1500, self._maybe_auto_backup_app_database)
+
         # First-run check: kalau ADB/Fastboot tidak bisa auto-detect,
         # arahkan user ke Settings untuk isi path manual - daripada
         # dibiarkan bingung karena semua fitur device diam-diam gagal
         # tanpa penjelasan yang jelas kenapa.
         QTimer.singleShot(300, self._check_first_run_tools)
+
+    def _maybe_auto_backup_app_database(self):
+        try:
+            if should_auto_backup(interval_hours=24):
+                zip_path = backup_app_database()
+                if zip_path:
+                    logger.info("Auto-backup database aplikasi: %s", zip_path)
+                    self._dash_log(f"💾 Auto-backup database aplikasi tersimpan: {zip_path.name}")
+                    retention = int(self.settings.get("app_db_backup_retention_days", 30))
+                    cleanup_old_app_backups(retention_days=retention)
+        except Exception:
+            logger.exception("Auto-backup database aplikasi gagal")
 
     def _check_first_run_tools(self):
         adb_ok = Path(_resolve_adb_path()).exists()
@@ -3511,11 +3542,19 @@ class MainWindow(QMainWindow):
         self.case_whatsapp_button = QPushButton("📲 Notifikasi WA")
         self.case_whatsapp_button.setObjectName("action")
         self.case_whatsapp_button.clicked.connect(self.send_case_whatsapp_notification)
+        self.case_parts_button = QPushButton("🔧 Part Terpakai")
+        self.case_parts_button.setObjectName("action")
+        self.case_parts_button.clicked.connect(self.view_case_parts_usage)
+        self.case_edit_button = QPushButton("✏️ Edit Data Case")
+        self.case_edit_button.setObjectName("action")
+        self.case_edit_button.clicked.connect(self.edit_case_info)
         action_row2.addWidget(self.case_photo_button)
         action_row2.addWidget(self.case_payment_button)
         action_row2.addWidget(self.case_invoice_button)
         action_row2.addWidget(self.case_label_button)
         action_row2.addWidget(self.case_whatsapp_button)
+        action_row2.addWidget(self.case_parts_button)
+        action_row2.addWidget(self.case_edit_button)
         action_row2.addStretch()
         list_layout.addLayout(action_row2)
 
@@ -3866,6 +3905,116 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Pembayaran
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Part terpakai per case - sebelumnya data ini tersimpan di DB
+    # (dari halaman Stok Sparepart) tapi tidak ada tampilannya sama
+    # sekali di halaman Service Cases.
+    # ------------------------------------------------------------------
+    def view_case_parts_usage(self):
+        case_id = self._selected_case_id()
+        if case_id is None:
+            QMessageBox.warning(self, "Pilih Case", "Pilih case dari tabel dulu.")
+            return
+
+        try:
+            case = get_case(case_id)
+            usage = get_usage_for_case(case_id)
+        except Exception as exc:
+            QMessageBox.critical(self, "Gagal", str(exc))
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Part Terpakai - {case.case_number}")
+        dialog.resize(480, 360)
+        dialog_layout = QVBoxLayout(dialog)
+
+        if not usage:
+            empty_label = QLabel("Belum ada sparepart yang dicatat dipakai untuk case ini.")
+            empty_label.setObjectName("muted")
+            empty_label.setWordWrap(True)
+            dialog_layout.addWidget(empty_label)
+        else:
+            table = QTableWidget(len(usage), 3)
+            table.setHorizontalHeaderLabels(["Part", "Jumlah", "Catatan"])
+            table.setEditTriggers(QTableWidget.NoEditTriggers)
+            table.horizontalHeader().setStretchLastSection(True)
+            for row, u in enumerate(usage):
+                table.setItem(row, 0, QTableWidgetItem(u.part_name))
+                table.setItem(row, 1, QTableWidgetItem(str(u.quantity)))
+                table.setItem(row, 2, QTableWidgetItem(u.note or "-"))
+            dialog_layout.addWidget(table)
+
+        hint = QLabel(
+            "Untuk mencatat pemakaian part baru, buka halaman Stok Sparepart "
+            "lalu pilih case ini dari dropdown saat 'Pakai Part'."
+        )
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        dialog_layout.addWidget(hint)
+
+        close_button = QPushButton("Tutup")
+        close_button.clicked.connect(dialog.accept)
+        dialog_layout.addWidget(close_button)
+
+        dialog.exec()
+
+    # ------------------------------------------------------------------
+    # Edit data dasar case (perbaiki salah ketik nama/HP/keluhan/IMEI)
+    # ------------------------------------------------------------------
+    def edit_case_info(self):
+        case_id = self._selected_case_id()
+        if case_id is None:
+            QMessageBox.warning(self, "Pilih Case", "Pilih case dari tabel dulu.")
+            return
+
+        try:
+            case = get_case(case_id)
+        except Exception as exc:
+            QMessageBox.critical(self, "Gagal", str(exc))
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Edit Data - {case.case_number}")
+        dialog_layout = QVBoxLayout(dialog)
+
+        dialog_layout.addWidget(QLabel("Nama Customer"))
+        name_input = QLineEdit(case.customer_name)
+        dialog_layout.addWidget(name_input)
+
+        dialog_layout.addWidget(QLabel("No. HP"))
+        phone_input = QLineEdit(case.customer_phone)
+        dialog_layout.addWidget(phone_input)
+
+        dialog_layout.addWidget(QLabel("Keluhan"))
+        complaint_input = QLineEdit(case.complaint)
+        dialog_layout.addWidget(complaint_input)
+
+        dialog_layout.addWidget(QLabel("IMEI"))
+        imei_input = QLineEdit(case.imei)
+        dialog_layout.addWidget(imei_input)
+
+        save_button = QPushButton("💾 Simpan Perubahan")
+        save_button.setObjectName("actionPrimary")
+        dialog_layout.addWidget(save_button)
+
+        def _save():
+            try:
+                update_case_info_db(
+                    case_id,
+                    customer_name=name_input.text(),
+                    customer_phone=phone_input.text(),
+                    complaint=complaint_input.text(),
+                    imei=imei_input.text(),
+                )
+                self.log_action("Edit Data Case", detail=case.case_number, status="OK")
+                self.refresh_cases_table()
+                dialog.accept()
+            except (ValueError, KeyError) as exc:
+                QMessageBox.warning(dialog, "Gagal Menyimpan", str(exc))
+
+        save_button.clicked.connect(_save)
+        dialog.exec()
+
     def update_case_payment(self):
         case_id = self._selected_case_id()
         if case_id is None:
@@ -4137,8 +4286,9 @@ class MainWindow(QMainWindow):
         completed_card, self.report_completed_value = make_stat_card("SELESAI")
         revenue_card, self.report_revenue_value = make_stat_card("PENDAPATAN (SUDAH DIBAYAR)")
         outstanding_card, self.report_outstanding_value = make_stat_card("SISA TAGIHAN")
+        profit_card, self.report_profit_value = make_stat_card("PROFIT BERSIH (- BIAYA PART)")
 
-        for card in (total_card, completed_card, revenue_card, outstanding_card):
+        for card in (total_card, completed_card, revenue_card, outstanding_card, profit_card):
             stats_row.addWidget(card, 1)
 
         layout.addLayout(stats_row)
@@ -4156,6 +4306,19 @@ class MainWindow(QMainWindow):
         self.report_status_table.horizontalHeader().setStretchLastSection(True)
         self.report_status_table.setMinimumHeight(180)
         detail_layout.addWidget(self.report_status_table)
+
+        technician_title = QLabel("Breakdown per Teknisi")
+        technician_title.setObjectName("cardTitle")
+        detail_layout.addWidget(technician_title)
+
+        self.report_technician_table = QTableWidget(0, 4)
+        self.report_technician_table.setHorizontalHeaderLabels(
+            ["Teknisi", "Total Case", "Case Selesai", "Pendapatan"]
+        )
+        self.report_technician_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.report_technician_table.horizontalHeader().setStretchLastSection(True)
+        self.report_technician_table.setMinimumHeight(150)
+        detail_layout.addWidget(self.report_technician_table)
 
         export_button = QPushButton("📊 Export Semua Case ke CSV (untuk Excel)")
         export_button.setObjectName("action")
@@ -4206,6 +4369,20 @@ class MainWindow(QMainWindow):
             f"Rp {summary.outstanding_balance:,.0f}".replace(",", ".")
         )
 
+        # Profit bersih = pendapatan (sudah dibayar) - biaya sparepart
+        # yang dipakai di periode yang sama. Sebelumnya laporan cuma
+        # nunjukin pendapatan kotor tanpa dikurangi biaya part sama
+        # sekali, jadi pemilik konter belum bisa lihat untung bersihnya.
+        try:
+            parts_cost = get_total_usage_cost(start, end)
+        except Exception:
+            parts_cost = 0.0
+        net_profit = summary.total_revenue - parts_cost
+        self.report_profit_value.setText(f"Rp {net_profit:,.0f}".replace(",", "."))
+        self.report_profit_value.setStyleSheet(
+            f"font-size:22px; color:{'#ff6b6b' if net_profit < 0 else '#22e583'};"
+        )
+
         turnaround_text = (
             f"{summary.avg_turnaround_hours:.1f} jam"
             if summary.avg_turnaround_hours is not None
@@ -4214,13 +4391,23 @@ class MainWindow(QMainWindow):
         self.report_detail_label.setText(
             f"Periode: {summary.period_label}\n"
             f"Case dibatalkan: {summary.cancelled_cases}\n"
-            f"Rata-rata waktu pengerjaan (case selesai): {turnaround_text}"
+            f"Rata-rata waktu pengerjaan (case selesai): {turnaround_text}\n"
+            f"Biaya sparepart terpakai: Rp {parts_cost:,.0f}".replace(",", ".")
         )
 
         self.report_status_table.setRowCount(len(summary.status_breakdown))
         for row, (status, count) in enumerate(summary.status_breakdown.items()):
             self.report_status_table.setItem(row, 0, QTableWidgetItem(status))
             self.report_status_table.setItem(row, 1, QTableWidgetItem(str(count)))
+
+        self.report_technician_table.setRowCount(len(summary.technician_breakdown))
+        for row, (tech, data) in enumerate(summary.technician_breakdown.items()):
+            self.report_technician_table.setItem(row, 0, QTableWidgetItem(tech))
+            self.report_technician_table.setItem(row, 1, QTableWidgetItem(str(int(data["total_cases"]))))
+            self.report_technician_table.setItem(row, 2, QTableWidgetItem(str(int(data["completed_cases"]))))
+            self.report_technician_table.setItem(
+                row, 3, QTableWidgetItem(f"Rp {data['revenue']:,.0f}".replace(",", "."))
+            )
 
     def export_cases_to_csv(self):
         file_path, _ = QFileDialog.getSaveFileName(
@@ -4414,34 +4601,61 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Pilih Part", "Pilih part dari daftar dulu.")
             return
 
-        qty_text, ok = QInputDialog.getText(self, "Pakai Part", "Jumlah yang dipakai:")
-        if not ok:
-            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Pakai Sparepart")
+        dialog_layout = QVBoxLayout(dialog)
 
+        dialog_layout.addWidget(QLabel("Jumlah yang dipakai:"))
+        qty_input = QLineEdit()
+        dialog_layout.addWidget(qty_input)
+
+        dialog_layout.addWidget(QLabel("Untuk Case (opsional - pilih dari daftar case aktif):"))
+        case_combo = QComboBox()
+        case_combo.addItem("(Tidak terkait case tertentu)", None)
         try:
-            qty = int(qty_text.strip())
-        except ValueError:
-            QMessageBox.warning(self, "Input Tidak Valid", "Jumlah harus berupa angka.")
-            return
+            # Case yang belum Completed/Cancelled = case yang masih aktif
+            # dikerjakan, jadi paling relevan buat dikaitkan pemakaian
+            # part - dropdown ini menggantikan input manual "ID case"
+            # yang sebelumnya harus diketik tanpa referensi apapun di UI.
+            active_cases = [
+                c for c in list_cases() if c.status not in ("Completed", "Cancelled")
+            ]
+            for c in active_cases:
+                case_combo.addItem(f"{c.case_number} - {c.customer_name} ({c.status})", c.id)
+        except Exception:
+            pass
+        dialog_layout.addWidget(case_combo)
 
-        case_id = None
-        case_id_text, ok = QInputDialog.getText(
-            self, "Case (Opsional)",
-            "ID case terkait (kosongkan kalau tidak terkait case tertentu):",
-        )
-        if ok and case_id_text.strip():
+        note_input = QLineEdit()
+        note_input.setPlaceholderText("Catatan (opsional)")
+        dialog_layout.addWidget(note_input)
+
+        confirm_button = QPushButton("✅ Konfirmasi Pemakaian")
+        confirm_button.setObjectName("actionPrimary")
+        dialog_layout.addWidget(confirm_button)
+
+        def _confirm():
             try:
-                case_id = int(case_id_text.strip())
+                qty = int(qty_input.text().strip())
             except ValueError:
-                QMessageBox.warning(self, "Case ID Tidak Valid", "ID case harus berupa angka.")
+                QMessageBox.warning(dialog, "Input Tidak Valid", "Jumlah harus berupa angka.")
                 return
 
-        try:
-            use_part(part_id, qty, case_id=case_id)
-            self.log_action("Pakai Sparepart", detail=f"Part #{part_id} x{qty} (case #{case_id or '-'})", status="OK")
-            self.refresh_parts_table()
-        except (ValueError, KeyError) as exc:
-            QMessageBox.critical(self, "Gagal", str(exc))
+            case_id = case_combo.currentData()
+
+            try:
+                use_part(part_id, qty, case_id=case_id, note=note_input.text().strip())
+                case_label = case_combo.currentText() if case_id else "-"
+                self.log_action(
+                    "Pakai Sparepart", detail=f"Part #{part_id} x{qty} untuk {case_label}", status="OK"
+                )
+                self.refresh_parts_table()
+                dialog.accept()
+            except (ValueError, KeyError) as exc:
+                QMessageBox.critical(dialog, "Gagal", str(exc))
+
+        confirm_button.clicked.connect(_confirm)
+        dialog.exec()
 
     def delete_selected_part(self):
         part_id = self._selected_part_id()
@@ -5513,6 +5727,40 @@ class MainWindow(QMainWindow):
         # teknisi aktif (dasar audit trail) tidak bisa diganti sembarangan
         # tanpa otentikasi oleh siapapun yang kebetulan pegang laptop.
         # ------------------------------------------------------------
+        # ------------------------------------------------------------
+        # Backup Database Aplikasi - BEDA dari 'Backup Device' (data HP
+        # pelanggan). Ini backup data BISNIS teknisi sendiri (case,
+        # pembayaran, stok sparepart, audit trail) yang kalau hilang
+        # (laptop rusak/kena virus) tidak ada cara mengembalikannya.
+        # ------------------------------------------------------------
+        app_backup_card, app_backup_layout = self._card_panel("Backup Database Aplikasi")
+
+        app_backup_desc = QLabel(
+            "Backup data servis (case, pembayaran, stok sparepart, audit trail) - "
+            "otomatis dibuat maks. 1x/24 jam saat aplikasi dibuka. Beda dari "
+            "'Backup Device' yang itu untuk data di HP pelanggan."
+        )
+        app_backup_desc.setObjectName("muted")
+        app_backup_desc.setWordWrap(True)
+        app_backup_layout.addWidget(app_backup_desc)
+
+        self.settings_last_backup_label = QLabel("")
+        self.settings_last_backup_label.setObjectName("value")
+        app_backup_layout.addWidget(self.settings_last_backup_label)
+
+        app_backup_btn_row = QHBoxLayout()
+        backup_now_button = QPushButton("💾 Backup Sekarang")
+        backup_now_button.setObjectName("actionPrimary")
+        backup_now_button.clicked.connect(self.backup_app_database_now)
+        restore_button = QPushButton("♻ Restore dari Backup...")
+        restore_button.setObjectName("action")
+        restore_button.clicked.connect(self.restore_app_database_dialog)
+        app_backup_btn_row.addWidget(backup_now_button)
+        app_backup_btn_row.addWidget(restore_button)
+        app_backup_layout.addLayout(app_backup_btn_row)
+
+        layout.addWidget(app_backup_card)
+
         security_card, security_layout = self._card_panel("Keamanan")
 
         self.settings_pin_status = QLabel("")
@@ -5613,6 +5861,65 @@ class MainWindow(QMainWindow):
                 "🔓 Halaman Settings belum dikunci PIN - siapapun bisa mengubah preferensi."
             )
 
+    def _update_last_backup_label(self):
+        if not hasattr(self, "settings_last_backup_label"):
+            return
+        last = get_last_backup_time()
+        if last:
+            self.settings_last_backup_label.setText(
+                f"Backup terakhir: {last.strftime('%d %b %Y, %H:%M')}"
+            )
+        else:
+            self.settings_last_backup_label.setText("Belum pernah dibackup.")
+
+    def backup_app_database_now(self):
+        try:
+            zip_path = backup_app_database()
+        except Exception as exc:
+            QMessageBox.critical(self, "Gagal Backup", str(exc))
+            return
+
+        if not zip_path:
+            QMessageBox.information(
+                self, "Tidak Ada Data",
+                "Belum ada database aplikasi untuk di-backup (aplikasi baru pertama kali dipakai)."
+            )
+            return
+
+        self.log_action("Backup Database Aplikasi", detail=str(zip_path), status="OK")
+        self._update_last_backup_label()
+        QMessageBox.information(self, "Backup Berhasil", f"Database aplikasi tersimpan di:\n{zip_path}")
+
+    def restore_app_database_dialog(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Pilih File Backup", str(APP_DB_BACKUP_DIR), "ZIP Files (*.zip)"
+        )
+        if not file_path:
+            return
+
+        reply = QMessageBox.question(
+            self, "Konfirmasi Restore",
+            "Restore akan MENIMPA database aplikasi saat ini (case, pembayaran, "
+            "stok sparepart, audit trail). Backup pengaman otomatis akan dibuat "
+            "dulu sebelum menimpa. Lanjutkan?\n\n"
+            "PENTING: Aplikasi perlu di-restart setelah restore untuk memuat data baru.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            results = restore_app_database(Path(file_path))
+        except Exception as exc:
+            QMessageBox.critical(self, "Gagal Restore", str(exc))
+            return
+
+        self.log_action("Restore Database Aplikasi", detail=str(file_path), status="OK")
+        QMessageBox.information(
+            self, "Restore Selesai",
+            "\n".join(results) + "\n\nSilakan tutup dan buka ulang aplikasi sekarang."
+        )
+
     def _browse_tool_path(self, line_edit: QLineEdit, tool_name: str):
         filter_str = "Executable (*.exe);;All Files (*)" if sys.platform == "win32" else "All Files (*)"
         path, _ = QFileDialog.getOpenFileName(self, f"Pilih {tool_name}", "", filter_str)
@@ -5668,6 +5975,7 @@ class MainWindow(QMainWindow):
 
     def load_settings_form(self):
         self._update_pin_status_label()
+        self._update_last_backup_label()
         self.settings_refresh_ms.setText(str(self.settings.get("auto_refresh_ms", 1500)))
 
         log_level = self.settings.get("log_level", "INFO")

@@ -217,6 +217,30 @@ def get_usage_for_case(case_id: int) -> list[PartUsage]:
         conn.close()
 
 
+def get_total_usage_cost(start_date: str, end_date: str) -> float:
+    """Total biaya sparepart yang dipakai dalam rentang tanggal tertentu
+    (qty x harga satuan SAAT INI part terkait) - dipakai Laporan Bisnis
+    untuk hitung profit bersih (pendapatan dikurangi biaya part).
+    Catatan: karena harga part bisa berubah dari waktu ke waktu dan
+    pemakaian tidak menyimpan harga historis saat dipakai, ini pakai
+    harga SAAT INI sebagai pendekatan - cukup akurat untuk part yang
+    harganya relatif stabil, tapi bisa sedikit meleset untuk part yang
+    baru saja naik/turun harga signifikan."""
+    init_parts()
+    conn = _connection()
+    try:
+        row = conn.execute(
+            """SELECT COALESCE(SUM(u.quantity * p.unit_price), 0) AS total_cost
+            FROM spare_part_usage u
+            JOIN spare_parts p ON p.id = u.part_id
+            WHERE date(u.created_at) >= date(?) AND date(u.created_at) <= date(?)""",
+            (start_date, end_date),
+        ).fetchone()
+        return float(row["total_cost"])
+    finally:
+        conn.close()
+
+
 def delete_part(part_id: int) -> None:
     conn = _connection()
     try:

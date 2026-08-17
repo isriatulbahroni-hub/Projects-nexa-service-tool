@@ -25,6 +25,10 @@ DEFAULTS: dict[str, Any] = {
     "known_technicians": [],
     # Retensi file backup lokal (hari). 0 = jangan hapus otomatis.
     "backup_retention_days": 30,
+    # Retensi backup database aplikasi sendiri (case/pembayaran/stok/audit
+    # trail) - beda dari backup_retention_days di atas yang itu untuk
+    # backup data HP pelanggan.
+    "app_db_backup_retention_days": 30,
     # Path adb/fastboot manual, kalau auto-detect (PATH/ToolRouter) gagal.
     "adb_path_override": "",
     "fastboot_path_override": "",
