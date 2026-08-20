@@ -729,6 +729,24 @@ class MainWindow(QMainWindow):
             "settings": self.settings_page,
         }
 
+        # QScrollArea (content_scroll di bawah) pakai setWidgetResizable(True)
+        # supaya lebar konten ngikutin viewport - efek sampingnya, TINGGI
+        # kontennya juga dipaksa minimal setinggi viewport. Kalau halaman
+        # aktif secara natural lebih pendek dari tinggi jendela (mis.
+        # Screen Mirror, Security Check), sisa ruang vertikal itu dibagi
+        # RATA ke semua widget di layout halaman (default QVBoxLayout tanpa
+        # stretch factor) - munculnya jadi celah kosong besar di ANTARA
+        # judul & deskripsi, bukan di bawah konten seperti yang diharapkan.
+        #
+        # Set alignment ke AlignTop di layout tiap halaman supaya widget-
+        # widgetnya selalu ngumpul rapat di atas, dan sisa ruang otomatis
+        # "diserap" di bawah (area kosong, kalau ada) tanpa bikin celah di
+        # antara elemen.
+        for page_widget in self.page_widgets.values():
+            page_layout = page_widget.layout()
+            if page_layout is not None:
+                page_layout.setAlignment(Qt.AlignTop)
+
         root_layout.addWidget(sidebar)
 
         # Area konten (di samping sidebar) dibungkus QScrollArea supaya
