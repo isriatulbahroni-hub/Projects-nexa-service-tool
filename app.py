@@ -410,6 +410,30 @@ QProgressBar::chunk {
 """
 
 
+class CurrentPageStackedWidget(QStackedWidget):
+    """QStackedWidget bawaan Qt melaporkan sizeHint()/minimumSizeHint()
+    berdasarkan halaman TERBESAR di antara semua halaman yang pernah
+    ditambahkan, bukan cuma halaman yang lagi aktif. Karena stack ini
+    ditaruh langsung di dalam QScrollArea (setWidgetResizable=True),
+    efeknya: pas buka halaman pendek (mis. Screen Mirror, Security
+    Check) setelah sebelumnya buka halaman panjang (mis. Dashboard),
+    scroll area tetap menganggap kontennya setinggi halaman terpanjang
+    -- muncul area kosong besar yang harus di-scroll padahal halaman
+    aktifnya sendiri pendek.
+
+    Override di sini bikin sizeHint/minimumSizeHint ikut halaman yang
+    lagi aktif saja, jadi scroll area otomatis menyusut/membesar sesuai
+    konten yang benar-benar ditampilkan."""
+
+    def sizeHint(self):
+        current = self.currentWidget()
+        return current.sizeHint() if current else super().sizeHint()
+
+    def minimumSizeHint(self):
+        current = self.currentWidget()
+        return current.minimumSizeHint() if current else super().minimumSizeHint()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -635,7 +659,7 @@ class MainWindow(QMainWindow):
         version.setWordWrap(True)
         side_layout.addWidget(version)
 
-        self.pages = QStackedWidget()
+        self.pages = CurrentPageStackedWidget()
 
         self.dashboard_page = self.create_dashboard_page()
         self.device_page = self.create_device_page()
@@ -843,7 +867,16 @@ class MainWindow(QMainWindow):
 
         self.pages.setCurrentWidget(self.page_widgets[key])
 
-        # BUG: seluruh QStackedWidget (semua halaman) dibungkus SATU
+        # Paksa QStackedWidget & QScrollArea recalculate ukuran sekarang
+        # juga (bukan nunggu event loop), supaya CurrentPageStackedWidget
+        # di atas langsung dipakai efeknya dan tidak sempat kelihatan
+        # "nyangkut" di ukuran halaman sebelumnya walau sesaat.
+        self.pages.updateGeometry()
+        if hasattr(self, "content_scroll"):
+            self.content_scroll.updateGeometry()
+
+        # BUG (sudah diperbaiki di atas via CurrentPageStackedWidget):
+        # sebelumnya seluruh QStackedWidget (semua halaman) dibungkus SATU
         # QScrollArea yang sama (self.content_scroll). Kalau user scroll ke
         # bawah di halaman yang panjang (mis. Dashboard) lalu pindah ke
         # halaman yang lebih pendek (mis. Security Check, Screen Mirror,
