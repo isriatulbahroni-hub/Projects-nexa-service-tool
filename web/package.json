@@ -1,17 +1,22 @@
 {
   "name": "nexa-service-web",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
+    "predev": "node scripts/fetch-scrcpy-server.mjs",
     "dev": "vite",
+    "prebuild": "node scripts/fetch-scrcpy-server.mjs",
     "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
-    "@yume-chan/adb": "^2.6.4",
-    "@yume-chan/adb-credential-web": "^2.1.0",
-    "@yume-chan/adb-daemon-webusb": "^2.3.2"
+    "@yume-chan/adb": "3.0.0-beta.5",
+    "@yume-chan/adb-credential-web": "3.0.0-beta.5",
+    "@yume-chan/adb-daemon-webusb": "3.0.0-beta.5",
+    "@yume-chan/adb-scrcpy": "3.0.0-beta.5",
+    "@yume-chan/scrcpy": "3.0.0-beta.5",
+    "@yume-chan/scrcpy-decoder-webcodecs": "3.0.0-beta.5"
   },
   "devDependencies": {
     "vite": "^6.0.0"
