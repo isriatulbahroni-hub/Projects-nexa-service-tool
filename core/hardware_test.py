@@ -233,13 +233,29 @@ def check_thermal(serial: str) -> HardwareTestResult:
     if not raw:
         return _result("thermal", "Thermal", "INFO", "No data", "Thermal service tidak mengembalikan data.")
 
-    # Severity level di Android: NONE, LIGHT, MODERATE, SEVERE, CRITICAL, EMERGENCY, SHUTDOWN
-    severe_hit = re.search(r"mStatus\s*=\s*(\d+)", raw) or re.search(r"Status:\s*(\w+)", raw)
+    # Severity level di Android (ThrottlingSeverity): 0=NONE 1=LIGHT
+    # 2=MODERATE 3=SEVERE 4=CRITICAL 5=EMERGENCY 6=SHUTDOWN. Sebelumnya
+    # kode regex ini di-assign ke severe_hit tapi TIDAK PERNAH dipakai -
+    # keputusan PASS/WARN/FAIL cuma dari substring text ("severe",
+    # "critical", dst) yang tidak selalu muncul di output (banyak build
+    # Android cuma melaporkan angka status, bukan kata). Itu bisa bikin
+    # device yang sebenarnya throttling parah malah lolos sebagai "Normal".
+    numeric_match = re.search(r"mStatus\s*=\s*(\d+)", raw)
     lowered = raw.lower()
 
-    if "shutdown" in lowered or "emergency" in lowered:
+    severity_from_code = None
+    if numeric_match:
+        code = int(numeric_match.group(1))
+        if code >= 3:
+            severity_from_code = "severe"
+        elif code >= 1:
+            severity_from_code = "light"
+
+    if "shutdown" in lowered or "emergency" in lowered or (
+        numeric_match and int(numeric_match.group(1)) >= 6
+    ):
         return _result("thermal", "Thermal", "FAIL", "Critical", "Device pernah/sedang thermal shutdown - cek pendinginan internal.")
-    if "severe" in lowered or "critical" in lowered:
+    if "severe" in lowered or "critical" in lowered or severity_from_code == "severe":
         return _result("thermal", "Thermal", "WARN", "Throttling", "Device mengalami thermal throttling tingkat tinggi.")
     return _result("thermal", "Thermal", "PASS", "Normal", "Tidak ada indikasi thermal throttling parah.")
 
@@ -254,6 +270,10 @@ def check_memory(serial: str) -> HardwareTestResult:
 
     total = re.search(r"Total RAM:\s*([\d,]+)K", raw)
     free = re.search(r"Free RAM:\s*([\d,]+)K", raw)
+    # Sebelumnya low_ram dihitung tapi tidak pernah dipakai di keputusan
+    # akhir - device yang jelas-jelas dilaporkan Android dalam status "low
+    # ram"/lowmemorykiller aktif tetap bisa lolos PASS kalau percent_free
+    # (yang dihitung manual dari parsing) kebetulan >= 5%.
     low_ram = "low ram" in raw.lower() or "lowmemorykiller" in raw.lower()
 
     if not total:
@@ -264,6 +284,8 @@ def check_memory(serial: str) -> HardwareTestResult:
     percent_free = (free_mb / total_mb * 100) if total_mb else 0
 
     value = f"{total_mb} MB total, {free_mb} MB free"
+    if low_ram:
+        return _result("memory", "RAM", "WARN", value, "Android melaporkan device dalam status low-memory (lowmemorykiller aktif) - RAM kemungkinan sering habis saat multitasking.")
     if percent_free < 5:
         return _result("memory", "RAM", "WARN", value, "RAM tersisa sangat sedikit - device mungkin sering lag/force-close aplikasi.")
     return _result("memory", "RAM", "PASS", value, "Penggunaan RAM dalam batas wajar.")

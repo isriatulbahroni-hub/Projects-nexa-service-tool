@@ -34,6 +34,12 @@ def list_dir(serial: str, remote_path: str = "/sdcard") -> list[RemoteEntry]:
         size = parts[4]
         name = parts[8]
 
+        # Untuk symlink, `ls -la` toybox menampilkan "nama -> target" di
+        # kolom terakhir - tanpa dipotong, nama file yang ditampilkan di
+        # File Explorer jadi ikut membawa " -> /path/target" yang membingungkan.
+        if permissions.startswith("l") and " -> " in name:
+            name = name.split(" -> ", 1)[0]
+
         if name in (".", ".."):
             continue
 

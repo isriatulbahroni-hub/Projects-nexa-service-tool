@@ -11,6 +11,10 @@ _router = ToolRouter()
 
 
 def _resolve_fastboot_path() -> str:
+    override = _get_path_override("fastboot_path_override")
+    if override and Path(override).exists():
+        return override
+
     if FASTBOOT_PATH.exists():
         return str(FASTBOOT_PATH)
 
@@ -19,6 +23,14 @@ def _resolve_fastboot_path() -> str:
         return str(fastboot_path)
 
     return str(FASTBOOT_PATH)
+
+
+def _get_path_override(key: str) -> str:
+    try:
+        from .settings import get_settings_store
+        return get_settings_store().get(key, "") or ""
+    except Exception:
+        return ""
 
 
 def run_fastboot(*args: str, timeout: int = 60) -> str:
@@ -30,7 +42,8 @@ def run_fastboot(*args: str, timeout: int = 60) -> str:
         result = subprocess.run(
             [fastboot_executable, *args],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
         )
@@ -109,7 +122,22 @@ COMMON_PARTITIONS = [
 CRITICAL_PARTITIONS = ["bootloader", "modem", "radio"]
 
 
-def flash_partition(partition: str, image_path: str, serial: str | None = None) -> str:
+def flash_partition(
+    partition: str, image_path: str, serial: str | None = None, allow_critical: bool = False
+) -> str:
+    # Defense-in-depth: sebelumnya fungsi ini akan flash partition APAPUN
+    # tanpa validasi - satu-satunya penghalang partition kritis
+    # (bootloader/modem/radio) cuma combo box di UI yang isinya dibatasi
+    # ke COMMON_PARTITIONS. Aman selama UI tidak berubah, tapi kalau ada
+    # caller lain (mis. automation/macro) yang manggil flash_partition()
+    # langsung, tidak ada yang mencegah flash partition kritis tanpa
+    # sengaja. Sekarang diblokir kecuali eksplisit di-allow.
+    if partition in CRITICAL_PARTITIONS and not allow_critical:
+        raise FastbootError(
+            f"Partition '{partition}' adalah partition kritis dan diblokir "
+            f"secara default. Set allow_critical=True kalau memang sengaja."
+        )
+
     args = []
 
     if serial:

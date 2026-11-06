@@ -21,14 +21,39 @@ def list_packages(serial: str, include_system: bool = False) -> list[PackageInfo
         args.append(flag)
 
     output = run_adb(*args)
-    packages = []
+    names = []
 
     for line in output.splitlines():
         line = line.strip()
 
         if line.startswith("package:"):
-            name = line[len("package:"):].strip()
-            packages.append(PackageInfo(package_name=name, is_system=not bool(flag)))
+            names.append(line[len("package:"):].strip())
+
+    if not include_system:
+        # Query di atas sudah difilter "-3" (third-party only), jadi semua
+        # hasil pasti bukan system app.
+        packages = [PackageInfo(package_name=n, is_system=False) for n in names]
+    else:
+        # Query tanpa filter mengembalikan SEMUA package (system + third-
+        # party bercampur). Sebelumnya di sini semuanya asal ditandai
+        # is_system=True, yang salah untuk app pihak ketiga (mis. NexaPay,
+        # Shopee, dll ikut ke-mark sebagai system app). Query tambahan
+        # "-3" dipakai untuk tahu mana yang sebenarnya third-party.
+        try:
+            third_party_output = run_adb(
+                "-s", serial, "shell", "pm", "list", "packages", "--user", "0", "-3"
+            )
+            third_party = {
+                line.strip()[len("package:"):].strip()
+                for line in third_party_output.splitlines()
+                if line.strip().startswith("package:")
+            }
+        except ADBError:
+            third_party = set()
+
+        packages = [
+            PackageInfo(package_name=n, is_system=n not in third_party) for n in names
+        ]
 
     return sorted(packages, key=lambda p: p.package_name.lower())
 
