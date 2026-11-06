@@ -23,3 +23,6 @@ data/
 .nomedia
 Thumbs.db
 desktop.ini
+
+# scrcpy-server hasil unduhan (diverifikasi SHA-256 saat dipakai)
+vendor/
