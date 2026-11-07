@@ -1,7 +1,10 @@
 import "./style.css";
-import { Adb, AdbDaemonTransport } from "@yume-chan/adb";
+import { Adb, adbDaemonAuthenticate } from "@yume-chan/adb";
 import { AdbDaemonWebUsbDeviceManager } from "@yume-chan/adb-daemon-webusb";
-import AdbWebCredentialStore from "@yume-chan/adb-credential-web";
+import { AdbWebCryptoCredentialManager, TangoLocalStorage } from "@yume-chan/adb-credential-web";
+import { AdbScrcpyClient, AdbScrcpyOptions5_0_1 } from "@yume-chan/adb-scrcpy";
+import { DefaultServerPath } from "@yume-chan/scrcpy";
+import { BitmapVideoFrameRenderer, WebCodecsVideoDecoder } from "@yume-chan/scrcpy-decoder-webcodecs";
 
 // ---------------------------------------------------------------
 // State & helpers
@@ -9,7 +12,12 @@ import AdbWebCredentialStore from "@yume-chan/adb-credential-web";
 let adb = null;
 let device = null;
 let mirrorRunning = false;
+let scrcpyClient = null;
+let scrcpyDecoder = null;
 let currentPage = "dashboard";
+
+// scrcpy-server diunduh saat build ke public/ (lihat scripts/fetch-scrcpy-server.mjs)
+const SCRCPY_SERVER_URL = "/scrcpy-server.bin";
 
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) =>
@@ -29,18 +37,28 @@ const PAGES = [
 async function sh(cmd) {
   if (!adb) throw new Error("Device belum terhubung.");
   try {
-    return (await adb.subprocess.noneProtocol.spawnWaitText(cmd)).trim();
+    return (await adb.subprocess.noneProtocol.spawn(cmd).wait().toString()).trim();
   } catch (e) {
     return "";
   }
 }
 async function shBytes(cmd) {
-  return adb.subprocess.noneProtocol.spawnWait(cmd);
+  return adb.subprocess.noneProtocol.spawn(cmd).wait();
 }
 const prop = (k) => sh(`getprop ${k}`);
 
 function statusClass(s) {
   return { PASS: "pass", WARN: "warn", FAIL: "fail", INFO: "info" }[s] || "info";
+}
+
+async function stopMirror() {
+  mirrorRunning = false;
+  const client = scrcpyClient;
+  const decoder = scrcpyDecoder;
+  scrcpyClient = null;
+  scrcpyDecoder = null;
+  try { decoder?.dispose(); } catch {}
+  try { await client?.close(); } catch {}
 }
 
 // ---------------------------------------------------------------
@@ -83,7 +101,7 @@ function needDevice() {
 }
 
 async function go(page) {
-  mirrorRunning = false;
+  stopMirror();
   currentPage = page;
   document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("active", b.dataset.page === page));
   if (!adb) return needDevice();
@@ -112,14 +130,18 @@ async function connect() {
 
     setConn("Menghubungkan… (cek layar HP, izinkan USB debugging)", false);
     const connection = await device.connect();
-    const transport = await AdbDaemonTransport.authenticate({
+    const transport = await adbDaemonAuthenticate({
       serial: device.serial,
       connection,
-      credentialStore: new AdbWebCredentialStore("Nexa Service Tool Web"),
+      credentialManager: new AdbWebCryptoCredentialManager(
+        new TangoLocalStorage("nexa-service-web-adb-key"),
+        "Nexa Service Tool Web",
+      ),
     });
     adb = new Adb(transport);
     transport.disconnected.then(() => {
       adb = null;
+      stopMirror();
       setConn("Terputus", false);
       go(currentPage);
     });
@@ -136,7 +158,7 @@ async function connect() {
 }
 
 async function disconnect() {
-  mirrorRunning = false;
+  await stopMirror();
   try { await adb?.close(); } catch {}
   adb = null;
   setConn("Belum terhubung", false);
@@ -317,32 +339,149 @@ const PAGE_RENDER = {
 
   async mirror(view) {
     view.innerHTML = `
-      <div class="card"><h2>Screen Mirror (screenshot berulang)</h2>
-        <div class="row"><button id="start" class="primary">▶ Mulai</button><button id="stop">⏹ Stop</button><span id="fps" class="muted"></span></div>
-        <img id="screen" class="screen" alt="" style="display:none" /></div>`;
-    const PNG = [0x89, 0x50, 0x4e, 0x47];
-    $("#stop").onclick = () => { mirrorRunning = false; };
+      <div class="card"><h2>Screen Mirror (scrcpy)</h2>
+        <div class="row">
+          <button id="start" class="primary">▶ Mulai</button>
+          <button id="stop">⏹ Stop</button>
+          <span id="mstat" class="muted"></span>
+        </div>
+        <div id="stage"></div>
+        <div class="row" id="navbar" style="display:none">
+          <button data-k="4">◀ Back</button>
+          <button data-k="3">⚪ Home</button>
+          <button data-k="187">▢ Recents</button>
+          <button id="shot">📷 Screenshot</button>
+        </div></div>`;
+
+    const stat = (t) => { const el = $("#mstat"); if (el) el.textContent = t; };
+    const ACTION = { Down: 0, Up: 1, Move: 2 };
+    const FINGER = -2n; // pointer id "finger" milik scrcpy
+
+    $("#stop").onclick = async () => {
+      await stopMirror();
+      const nb = $("#navbar");
+      if (nb) nb.style.display = "none";
+      stat("Berhenti.");
+    };
+
     $("#start").onclick = async () => {
       if (mirrorRunning) return;
       mirrorRunning = true;
-      let last = null;
-      while (mirrorRunning && adb) {
-        const t0 = performance.now();
-        try {
-          const data = await shBytes("screencap -p");
-          if (data.length > 100 && PNG.every((b, i) => data[i] === b)) {
-            const url = URL.createObjectURL(new Blob([data], { type: "image/png" }));
-            const img = $("#screen");
-            if (!img) break;
-            img.src = url;
-            img.style.display = "block";
-            if (last) URL.revokeObjectURL(last);
-            last = url;
-            $("#fps").textContent = `${(1000 / (performance.now() - t0)).toFixed(1)} fps`;
+      try {
+        if (typeof VideoDecoder === "undefined") throw new Error("Browser ini tidak mendukung WebCodecs. Pakai Chrome atau Edge terbaru.");
+
+        stat("Mengunduh server scrcpy…");
+        const res = await fetch(SCRCPY_SERVER_URL);
+        if (!res.ok) throw new Error(`File server scrcpy tidak ditemukan (${res.status}).`);
+        const server = new Uint8Array(await res.arrayBuffer());
+        // jar = zip, harus diawali "PK"
+        if (!(server[0] === 0x50 && server[1] === 0x4b)) throw new Error("File server scrcpy tidak valid.");
+
+        stat("Mengirim server ke HP…");
+        await AdbScrcpyClient.pushServer(
+          adb,
+          new ReadableStream({ start(c) { c.enqueue(server); c.close(); } }),
+        );
+
+        stat("Memulai scrcpy…");
+        const client = await AdbScrcpyClient.start(
+          adb,
+          DefaultServerPath,
+          new AdbScrcpyOptions5_0_1({ audio: false, control: true, maxSize: 1024, maxFps: 30 }),
+        );
+        if (!mirrorRunning) { await client.close(); return; }
+        scrcpyClient = client;
+
+        // output server harus dikuras agar koneksi ADB tidak macet
+        client.output.pipeTo(new WritableStream({ write() {} })).catch(() => {});
+        client.exited.then(() => {
+          if (scrcpyClient === client) {
+            scrcpyClient = null;
+            mirrorRunning = false;
+            stat("scrcpy berhenti.");
           }
-        } catch { break; }
+        }).catch(() => {});
+
+        const { metadata, stream } = await client.videoStream;
+        const stage = $("#stage");
+        if (!stage) return;
+        const canvas = document.createElement("canvas");
+        canvas.className = "screen";
+        canvas.style.touchAction = "none";
+        canvas.style.maxWidth = "100%";
+        canvas.style.maxHeight = "75vh";
+        canvas.style.cursor = "pointer";
+        stage.replaceChildren(canvas);
+
+        const decoder = new WebCodecsVideoDecoder({
+          codec: metadata.codec,
+          renderer: new BitmapVideoFrameRenderer({ canvas }),
+        });
+        scrcpyDecoder = decoder;
+        stream.pipeTo(decoder.writable).catch(() => {});
+
+        // --- kontrol sentuh ---
+        let pressed = false;
+        const touch = (action, e) => {
+          const ctrl = scrcpyClient?.controller;
+          if (!ctrl || !canvas.width || !canvas.height) return;
+          const rect = canvas.getBoundingClientRect();
+          const x = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+          const y = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
+          ctrl.injectTouch({
+            action,
+            pointerId: FINGER,
+            pointerX: Math.round(x * canvas.width),
+            pointerY: Math.round(y * canvas.height),
+            videoWidth: canvas.width,
+            videoHeight: canvas.height,
+            pressure: action === ACTION.Up ? 0 : 1,
+            actionButton: 0,
+            buttons: action === ACTION.Up ? 0 : 1,
+          }).catch(() => {});
+        };
+        canvas.addEventListener("pointerdown", (e) => {
+          e.preventDefault();
+          pressed = true;
+          canvas.setPointerCapture(e.pointerId);
+          touch(ACTION.Down, e);
+        });
+        canvas.addEventListener("pointermove", (e) => { if (pressed) touch(ACTION.Move, e); });
+        const release = (e) => { if (pressed) { pressed = false; touch(ACTION.Up, e); } };
+        canvas.addEventListener("pointerup", release);
+        canvas.addEventListener("pointercancel", release);
+
+        // --- tombol navigasi & screenshot ---
+        const nb = $("#navbar");
+        nb.style.display = "";
+        nb.querySelectorAll("button[data-k]").forEach((b) => {
+          b.onclick = async () => {
+            const ctrl = scrcpyClient?.controller;
+            if (!ctrl) return;
+            const keyCode = Number(b.dataset.k);
+            try {
+              await ctrl.injectKeyCode({ action: 0, keyCode, repeat: 0, metaState: 0 });
+              await ctrl.injectKeyCode({ action: 1, keyCode, repeat: 0, metaState: 0 });
+            } catch {}
+          };
+        });
+        $("#shot").onclick = async () => {
+          const blob = await scrcpyDecoder?.snapshot();
+          if (!blob) return;
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = `screenshot-${Date.now()}.png`;
+          a.click();
+          setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+        };
+
+        stat(`Terhubung · ${canvas.width}×${canvas.height}`);
+      } catch (e) {
+        await stopMirror();
+        stat("");
+        const stage = $("#stage");
+        if (stage) stage.innerHTML = `<pre class="fail">${esc(e.message || e)}</pre>`;
       }
-      mirrorRunning = false;
     };
   },
 
