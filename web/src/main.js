@@ -65,34 +65,49 @@ async function stopMirror() {
 // Layout
 // ---------------------------------------------------------------
 $("#app").innerHTML = `
-  <header>
-    <h1>🛠️ Nexa <span>Service Tool</span> Web</h1>
-    <span id="conn" class="badge muted">Belum terhubung</span>
-    <button id="btnConnect" class="primary">Hubungkan HP (USB)</button>
-    <button id="btnDisconnect" style="display:none">Putuskan</button>
-  </header>
-  <nav id="nav"></nav>
-  <main id="view"></main>
+  <div class="app">
+    <aside>
+      <div class="brand">Nexa Service Tool<small>Versi web, baca-saja</small></div>
+      <nav id="nav"></nav>
+    </aside>
+    <div class="col">
+      <div class="top">
+        <div class="mbrand">Nexa Service Tool</div>
+        <div id="conn" class="chip"><span class="led"></span><span id="connText">Belum terhubung</span></div>
+        <button id="btnConnect" class="primary">Hubungkan HP (USB)</button>
+        <button id="btnDisconnect" style="display:none">Putuskan</button>
+      </div>
+      <main id="view"></main>
+    </div>
+    <div class="bnav" id="bnav">
+      <button data-page="dashboard">Beranda</button>
+      <button data-page="hardware">Diagnosa</button>
+      <button class="scan" id="scan" aria-label="Jalankan semua pemeriksaan">Periksa</button>
+      <button data-page="mirror">Mirror</button>
+      <button data-page="terminal">Log</button>
+    </div>
+  </div>
 `;
 
 $("#nav").innerHTML = PAGES.map(([k, l]) => `<button data-page="${k}">${l}</button>`).join("");
-$("#nav").addEventListener("click", (e) => {
+$("#app").addEventListener("click", (e) => {
   const b = e.target.closest("button[data-page]");
   if (b) go(b.dataset.page);
 });
+$("#scan").onclick = () => go("hardware");
 $("#btnConnect").onclick = connect;
 $("#btnDisconnect").onclick = disconnect;
 
 function setConn(text, ok) {
-  $("#conn").textContent = text;
-  $("#conn").className = "badge " + (ok ? "pass" : "muted");
+  $("#connText").textContent = text;
+  $("#conn").classList.toggle("on", ok);
   $("#btnConnect").style.display = ok ? "none" : "";
   $("#btnDisconnect").style.display = ok ? "" : "none";
 }
 
 function needDevice() {
   $("#view").innerHTML = `
-    <div class="card">
+    <div class="empty">
       <h2>Hubungkan HP dulu</h2>
       <p>Colokkan HP lewat kabel USB, aktifkan <b>USB debugging</b>, lalu tekan <b>Hubungkan HP (USB)</b> dan pilih perangkatnya.</p>
       <p class="muted">Syarat: browser Chrome/Edge (desktop) atau Chrome Android dengan kabel OTG, halaman HTTPS.
@@ -103,7 +118,7 @@ function needDevice() {
 async function go(page) {
   stopMirror();
   currentPage = page;
-  document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("active", b.dataset.page === page));
+  document.querySelectorAll("#nav button, #bnav button[data-page]").forEach((b) => b.classList.toggle("active", b.dataset.page === page));
   if (!adb) return needDevice();
   const view = $("#view");
   view.innerHTML = `<p class="muted">Memuat…</p>`;
@@ -214,22 +229,45 @@ const PAGE_RENDER = {
     ]);
     const bat = parseBattery(batRaw);
     const wifiIp = (ip.match(/inet (\d+\.\d+\.\d+\.\d+)/) || [])[1] || "-";
-    const stat = (k, v) => `<div class="stat"><div class="k">${k}</div><div class="v">${esc(v)}</div></div>`;
+    const finds = [];
+    if (bat.healthCode > 2) finds.push(["Baterai", `Kesehatan baterai: ${bat.health}`]);
+    if (bat.temp != null && bat.temp >= 42) finds.push(["Suhu baterai", `${bat.temp.toFixed(1)} °C, di atas batas wajar 42 °C`]);
+    if (storage && storage.percent >= 85) finds.push(["Penyimpanan", `${storage.percent}% terpakai`]);
+    if (mem && mem.percentFree < 5) finds.push(["RAM", "Hampir habis"]);
+    const level = Number(bat.level) || 0;
+    const segs = Array.from({ length: 20 }, (_, i) => `<i style="--i:${i}" class="${i < Math.round(level / 5) ? "on" : ""}"></i>`).join("");
+    const meta = (k, v) => `<div><dt>${k}</dt><dd>${esc(v)}</dd></div>`;
+    const tiles = PAGES.map(([k, l]) => `<button data-page="${k}" class="${k === "dashboard" ? "active" : ""}">${l}</button>`).join("");
+    const rowsHtml = finds.length
+      ? finds.map(([t, d]) => `<li data-s="warn"><span class="mk"></span><div>${esc(t)}<em>${esc(d)}</em></div><span class="st">Perlu dicek</span></li>`).join("")
+      : `<li data-s="ok"><span class="mk"></span><div>Tidak ada kerusakan terdeteksi<em>Pemeriksaan lengkap ada di Hardware Test</em></div><span class="st">Baik</span></li>`;
     view.innerHTML = `
-      <div class="card"><h2>Perangkat</h2><div class="grid">
-        ${stat("Merek / Model", `${brand} ${model}`)}
-        ${stat("Android", `${android} (SDK ${sdk})`)}
-        ${stat("Security patch", patch || "-")}
-        ${stat("Serial", serial || device?.serial || "-")}
-      </div></div>
-      <div class="card"><h2>Kondisi</h2><div class="grid">
-        ${stat("Baterai", `${bat.level ?? "?"}% · ${bat.health}`)}
-        ${stat("Suhu baterai", bat.temp != null ? bat.temp.toFixed(1) + " °C" : "-")}
-        ${stat("Penyimpanan", storage ? `${gb(storage.used)} / ${gb(storage.total)} (${storage.percent}%)` : "-")}
-        ${stat("RAM", mem ? `${gb(mem.avail)} bebas dari ${gb(mem.total)}` : "-")}
-        ${stat("IP WiFi", wifiIp)}
-      </div></div>
-      <div class="row"><button id="refresh">🔄 Refresh</button></div>`;
+      <section class="readout">
+        <div>
+          <h1>${esc(model || "Perangkat")}</h1>
+          <p>${esc(brand)}, Android ${esc(android)} (SDK ${esc(sdk)})</p>
+          <dl class="meta">
+            ${meta("RAM", mem ? `${gb(mem.avail)} bebas dari ${gb(mem.total)}` : "-")}
+            ${meta("Penyimpanan", storage ? `${gb(storage.used)} dari ${gb(storage.total)}` : "-")}
+            ${meta("Suhu baterai", bat.temp != null ? bat.temp.toFixed(1) + " °C" : "-")}
+            ${meta("Kesehatan baterai", bat.health)}
+            ${meta("Security patch", patch || "-")}
+            ${meta("Serial", serial || device?.serial || "-")}
+            ${meta("IP WiFi", wifiIp)}
+          </dl>
+        </div>
+        <div class="batt"><b>${level}%</b><div class="segs" role="img" aria-label="Baterai ${level} persen">${segs}</div></div>
+      </section>
+      <div class="tiles">${tiles}</div>
+      <div class="stats">
+        <div><b>1</b><span>Perangkat terhubung</span></div>
+        <div><b>Aktif</b><span>ADB</span></div>
+        <div><b>${storage ? storage.percent + "%" : "-"}</b><span>Penyimpanan terpakai</span></div>
+        <div><b>${finds.length}</b><span>Temuan</span></div>
+      </div>
+      <h2>Kondisi perangkat</h2>
+      <ul class="rows">${rowsHtml}</ul>
+      <div class="row"><button id="refresh">Refresh</button></div>`;
     $("#refresh").onclick = () => go("dashboard");
   },
 
