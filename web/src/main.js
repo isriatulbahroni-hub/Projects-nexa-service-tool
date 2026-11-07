@@ -6,6 +6,13 @@ import { AdbScrcpyClient, AdbScrcpyOptions5_0_1 } from "@yume-chan/adb-scrcpy";
 import { DefaultServerPath } from "@yume-chan/scrcpy";
 import { BitmapVideoFrameRenderer, WebCodecsVideoDecoder } from "@yume-chan/scrcpy-decoder-webcodecs";
 
+// PWA: daftarkan service worker hanya di build produksi
+if ("serviceWorker" in navigator && import.meta.env.PROD) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => {});
+  });
+}
+
 // ---------------------------------------------------------------
 // State & helpers
 // ---------------------------------------------------------------
@@ -18,6 +25,21 @@ let currentPage = "dashboard";
 
 // scrcpy-server diunduh saat build ke public/ (lihat scripts/fetch-scrcpy-server.mjs)
 const SCRCPY_SERVER_URL = "/scrcpy-server.bin";
+
+const MIRROR_HELP = `
+  <details class="help" style="margin-top:12px">
+    <summary><b>Layar HP tidak bisa disentuh / HP tidak terdeteksi?</b></summary>
+    <p><b>HP menyala tapi layar tidak bisa disentuh (USB debugging belum aktif):</b></p>
+    <ol>
+      <li>Colok <b>mouse USB</b> ke HP pelanggan lewat adaptor OTG. Akan muncul kursor di layar.</li>
+      <li>Buka Pengaturan, Tentang ponsel, ketuk <b>Build number</b> 7 kali, lalu Opsi pengembang dan aktifkan <b>USB debugging</b>.</li>
+      <li>Cabut mouse, colok kabel dari HP ini ke HP pelanggan, tekan <b>Hubungkan HP (USB)</b>.</li>
+      <li>Di HP pelanggan, ketuk <b>Izinkan</b> pada dialog debugging (pakai mouse), lalu tekan <b>Mulai</b> di sini.</li>
+    </ol>
+    <p><b>Layar mati total atau pecah:</b> kalau USB debugging sudah pernah diizinkan, mirror tetap bisa menampilkan layarnya. Kalau belum, ADB tidak bisa jalan; coba layar eksternal lewat USB-C ke HDMI (hanya HP yang mendukung) sambil memakai mouse.</p>
+    <p><b>HP tidak bisa menyala:</b> alat ini tidak bisa membantu karena ADB butuh Android yang sudah berjalan. Cek charger, kabel, baterai, dan kerusakan hardware.</p>
+    <p><b>HP terkunci:</b> minta pemilik membukanya sendiri. Alat ini tidak membuka kunci layar atau akun.</p>
+  </details>`;
 
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) =>
@@ -351,7 +373,8 @@ const PAGE_RENDER = {
           <button data-k="3">⚪ Home</button>
           <button data-k="187">▢ Recents</button>
           <button id="shot">📷 Screenshot</button>
-        </div></div>`;
+        </div>
+        ${MIRROR_HELP}</div>`;
 
     const stat = (t) => { const el = $("#mstat"); if (el) el.textContent = t; };
     const ACTION = { Down: 0, Up: 1, Move: 2 };
