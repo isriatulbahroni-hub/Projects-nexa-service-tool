@@ -1,0 +1,19 @@
+{
+  "name": "Nexa Service Tool",
+  "short_name": "Nexa Service",
+  "description": "Diagnosa dan mirror HP Android lewat USB, langsung dari browser.",
+  "lang": "id",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
