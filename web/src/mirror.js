@@ -5,6 +5,8 @@
 //  - tiap tahap punya batas waktu, jadi tidak menggantung selamanya di "Mengirim server ke HP..."
 //  - kalau push lewat sync macet, otomatis pindah ke push lewat shell (base64)
 //  - profil kualitas Ringan / Normal / Tajam
+//  - tata letak dua kolom: layar HP dalam bingkai ponsel + panel kontrol (lihat mirror.css)
+import "./mirror.css";
 import { AdbScrcpyClient, AdbScrcpyOptions5_0_1 } from "@yume-chan/adb-scrcpy";
 import { DefaultServerPath } from "@yume-chan/scrcpy";
 import { BitmapVideoFrameRenderer, WebCodecsVideoDecoder } from "@yume-chan/scrcpy-decoder-webcodecs";
@@ -17,6 +19,22 @@ const PROFILES = {
   normal: { label: "Normal (1024p)", maxSize: 1024, maxFps: 30, videoBitRate: 4_000_000 },
   tajam: { label: "Tajam (1600p)", maxSize: 1600, maxFps: 30, videoBitRate: 8_000_000 },
 };
+
+// Ikon garis sederhana (stroke mengikuti warna teks tombol)
+const IC = {
+  back: '<path d="M15 5l-7 7 7 7"/>',
+  home: '<circle cx="12" cy="12" r="7"/>',
+  recents: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
+  volm: '<path d="M4 10v4h4l5 4V6L8 10H4z"/><path d="M16 12h5"/>',
+  volp: '<path d="M4 10v4h4l5 4V6L8 10H4z"/><path d="M16 12h5M18.5 9.5v5"/>',
+  power: '<path d="M12 3v9"/><path d="M6.5 7a8 8 0 1 0 11 0"/>',
+  bell: '<path d="M6 16v-5a6 6 0 0 1 12 0v5l2 2H4z"/><path d="M10 21h4"/>',
+  rotate: '<path d="M20 12a8 8 0 1 1-3-6.2"/><path d="M20 4v5h-5"/>',
+  shot: '<rect x="3" y="6" width="18" height="14" rx="2"/><circle cx="12" cy="13" r="3.5"/><path d="M9 6l1.5-2h3L15 6"/>',
+  phone: '<rect x="7" y="2" width="10" height="20" rx="2.5"/><path d="M11 18h2"/>',
+};
+const icon = (k) => `<svg class="ic" viewBox="0 0 24 24" aria-hidden="true">${IC[k]}</svg>`;
+const keyBtn = (k, ic, label) => `<button class="mx-btn" data-k="${k}">${icon(ic)}<span>${label}</span></button>`;
 
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) =>
@@ -116,54 +134,82 @@ async function pushViaShell(sh, bytes, path, onProgress) {
 // ---------------------------------------------------------------
 // Halaman Mirror
 // ---------------------------------------------------------------
+const placeholderHtml = () => `
+  <div class="mx-ph">
+    <div class="shape">${icon("phone")}</div>
+    <p><b>Layar HP belum tampil</b><span>Tekan <b style="display:inline">Mulai</b> untuk menampilkan dan mengendalikan layar HP dari sini.</span></p>
+  </div>`;
+
 export function renderMirror(view, { sh, getAdb, helpHtml }) {
   let saved = "ringan";
   try { saved = localStorage.getItem(PROFILE_KEY) || "ringan"; } catch {}
   if (!PROFILES[saved]) saved = "ringan";
 
   view.innerHTML = `
-    <div class="card"><h2>Screen Mirror (scrcpy)</h2>
-      <div class="row">
-        <button id="start" class="primary">▶ Mulai</button>
-        <button id="stop">⏹ Stop</button>
-        <select id="profile" aria-label="Kualitas mirror">
-          ${Object.entries(PROFILES).map(([k, p]) => `<option value="${k}"${k === saved ? " selected" : ""}>${esc(p.label)}</option>`).join("")}
-        </select>
-        <span id="mstat" class="muted"></span>
-      </div>
-      <div id="stage"></div>
-      <div class="row" id="navbar" style="display:none">
-        <button data-k="4">◀ Back</button>
-        <button data-k="3">⚪ Home</button>
-        <button data-k="187">▢ Recents</button>
-        <button data-k="26">⏻ Power</button>
-        <button data-k="25">🔉 Vol−</button>
-        <button data-k="24">🔊 Vol+</button>
-        <button data-fn="notif">🔔 Notifikasi</button>
-        <button data-fn="rotate">⟳ Putar</button>
-        <button id="shot">📷 Screenshot</button>
-      </div>
-      <div class="row" id="typebar" style="display:none">
-        <input id="typetxt" placeholder="Ketik teks untuk dikirim ke HP…" />
-        <button id="typego">Kirim teks</button>
-      </div>
-      <p class="muted" id="kbhint" style="display:none">Klik layar HP di atas, lalu ketik dengan keyboard komputer dan scroll dengan roda mouse. Untuk HP dengan keyboard layar, kotak "Ketik teks" lebih andal.</p>
-      <p class="muted">Kalau mirror terasa berat atau lambat, pilih kualitas <b>Ringan</b>. Pertama kali dipakai butuh beberapa detik untuk memasang server di HP; berikutnya lebih cepat.</p>
-      ${helpHtml}</div>`;
+    <div class="mx" id="mx">
+      <section class="mx-main">
+        <div class="mx-bar">
+          <h2>Screen Mirror <small>scrcpy</small></h2>
+          <select id="profile" aria-label="Kualitas mirror">
+            ${Object.entries(PROFILES).map(([k, p]) => `<option value="${k}"${k === saved ? " selected" : ""}>${esc(p.label)}</option>`).join("")}
+          </select>
+          <button id="start" class="primary">▶ Mulai</button>
+          <button id="stop">⏹ Stop</button>
+        </div>
+        <div class="mx-status"><span class="led"></span><span id="mstat">Belum berjalan</span></div>
+        <div class="mx-stage"><div id="stage">${placeholderHtml()}</div></div>
+        <p class="mx-err" id="merr"></p>
+      </section>
+
+      <aside class="mx-panel" id="navbar" aria-label="Kontrol HP">
+        <div class="mx-sec">
+          <h3>Navigasi</h3>
+          <div class="mx-grid">
+            ${keyBtn(4, "back", "Back")}
+            ${keyBtn(3, "home", "Home")}
+            ${keyBtn(187, "recents", "Recents")}
+          </div>
+        </div>
+        <div class="mx-sec">
+          <h3>Tombol fisik</h3>
+          <div class="mx-grid">
+            ${keyBtn(25, "volm", "Vol−")}
+            ${keyBtn(24, "volp", "Vol+")}
+            ${keyBtn(26, "power", "Power")}
+          </div>
+        </div>
+        <div class="mx-sec">
+          <h3>Aksi</h3>
+          <div class="mx-grid">
+            <button class="mx-btn" data-fn="notif">${icon("bell")}<span>Notifikasi</span></button>
+            <button class="mx-btn" data-fn="rotate">${icon("rotate")}<span>Putar</span></button>
+            <button class="mx-btn" id="shot">${icon("shot")}<span>Screenshot</span></button>
+          </div>
+        </div>
+        <div class="mx-sec" id="typebar">
+          <h3>Ketik teks</h3>
+          <div class="mx-type">
+            <input id="typetxt" placeholder="Ketik lalu Enter…" />
+            <button id="typego">Kirim</button>
+          </div>
+          <p class="mx-hint" id="kbhint">Klik layar HP, lalu ketik dengan keyboard komputer dan scroll dengan roda mouse. Untuk HP dengan keyboard layar, kotak ini lebih andal.</p>
+        </div>
+        <p class="mx-tip">Terasa berat? Pilih kualitas <b>Ringan</b>. Pemasangan pertama butuh beberapa detik; berikutnya lebih cepat.</p>
+      </aside>
+    </div>
+    ${helpHtml}`;
 
   // mulai unduh server sekarang, supaya saat Mulai ditekan sudah siap
   prefetchServer().catch(() => {});
 
+  const ws = $("#mx");
   const stat = (t) => { const el = $("#mstat"); if (el) el.textContent = t; };
+  const showErr = (t) => { const el = $("#merr"); if (el) el.textContent = t || ""; };
+  const resetStage = () => { const s = $("#stage"); if (s) s.innerHTML = placeholderHtml(); };
   const ACTION = { Down: 0, Up: 1, Move: 2 };
   const FINGER = -2n; // pointer id "finger" milik scrcpy
   const KEYMAP = { Enter: 66, Backspace: 67, Delete: 112, Tab: 61, ArrowUp: 19, ArrowDown: 20, ArrowLeft: 21, ArrowRight: 22, Escape: 4, Home: 3 };
-  const hideControls = () => {
-    for (const id of ["#navbar", "#typebar", "#kbhint"]) {
-      const el = $(id);
-      if (el) el.style.display = "none";
-    }
-  };
+  const setLive = (on) => ws?.classList.toggle("live", on);
 
   $("#profile").onchange = (e) => {
     try { localStorage.setItem(PROFILE_KEY, e.target.value); } catch {}
@@ -171,13 +217,16 @@ export function renderMirror(view, { sh, getAdb, helpHtml }) {
 
   $("#stop").onclick = async () => {
     await stopMirror();
-    hideControls();
+    setLive(false);
+    resetStage();
+    showErr("");
     stat("Berhenti.");
   };
 
   $("#start").onclick = async () => {
     if (running) return;
     running = true;
+    showErr("");
     const adb = getAdb();
     const profile = PROFILES[$("#profile").value] || PROFILES.ringan;
     const t0 = performance.now();
@@ -244,6 +293,7 @@ export function renderMirror(view, { sh, getAdb, helpHtml }) {
         if (client === started) {
           client = null;
           running = false;
+          setLive(false);
           stat("scrcpy berhenti.");
         }
       }).catch(() => {});
@@ -257,14 +307,11 @@ export function renderMirror(view, { sh, getAdb, helpHtml }) {
       const stage = $("#stage");
       if (!stage) return;
       const canvas = document.createElement("canvas");
-      canvas.className = "screen";
       canvas.tabIndex = 0;
-      canvas.style.touchAction = "none";
-      canvas.style.maxWidth = "100%";
-      canvas.style.maxHeight = "75vh";
-      canvas.style.cursor = "pointer";
-      canvas.style.outline = "none";
-      stage.replaceChildren(canvas);
+      const frame = document.createElement("div");
+      frame.className = "mx-frame";
+      frame.appendChild(canvas);
+      stage.replaceChildren(frame);
 
       const dec = new WebCodecsVideoDecoder({
         codec: metadata.codec,
@@ -351,9 +398,7 @@ export function renderMirror(view, { sh, getAdb, helpHtml }) {
       });
 
       // --- tombol navigasi, fungsi, dan screenshot ---
-      const nb = $("#navbar");
-      nb.style.display = "";
-      nb.querySelectorAll("button[data-k]").forEach((b) => {
+      view.querySelectorAll("button[data-k]").forEach((b) => {
         b.onclick = async () => {
           const c = ctrl();
           if (!c) return;
@@ -364,7 +409,7 @@ export function renderMirror(view, { sh, getAdb, helpHtml }) {
           } catch (e) { report(e); }
         };
       });
-      nb.querySelectorAll("button[data-fn]").forEach((b) => {
+      view.querySelectorAll("button[data-fn]").forEach((b) => {
         b.onclick = async () => {
           const c = ctrl();
           if (!c) return;
@@ -385,8 +430,6 @@ export function renderMirror(view, { sh, getAdb, helpHtml }) {
       };
 
       // --- kirim teks ---
-      $("#typebar").style.display = "";
-      $("#kbhint").style.display = "";
       const sendText = async () => {
         const input = $("#typetxt");
         const c = ctrl();
@@ -399,6 +442,7 @@ export function renderMirror(view, { sh, getAdb, helpHtml }) {
       $("#typego").onclick = sendText;
       $("#typetxt").onkeydown = (e) => { if (e.key === "Enter") sendText(); };
 
+      setLive(true);
       const took = Math.round((performance.now() - t0) / 100) / 10;
       clearInterval(tick);
       stat(`Terhubung · menunggu gambar… (siap dalam ${took} dtk)`);
@@ -406,10 +450,10 @@ export function renderMirror(view, { sh, getAdb, helpHtml }) {
       if (client === started) stat(`Terhubung · ${canvas.width}×${canvas.height} · siap dalam ${took} dtk`);
     } catch (e) {
       await stopMirror();
-      stat("");
-      hideControls();
-      const stage = $("#stage");
-      if (stage) stage.innerHTML = `<pre class="fail">${esc(e.message || e)}</pre>`;
+      setLive(false);
+      resetStage();
+      stat("Gagal memulai.");
+      showErr(e.message || String(e));
     } finally {
       clearInterval(tick);
     }

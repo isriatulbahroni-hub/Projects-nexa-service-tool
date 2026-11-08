@@ -1,0 +1,66 @@
+/* Tata letak halaman Mirror: layar HP di kiri (dalam bingkai ponsel), panel kontrol di kanan. */
+.mx{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:16px;align-items:start;margin-bottom:14px}
+
+/* ---------- area layar ---------- */
+.mx-main{background:var(--panel);border:1px solid var(--line);min-width:0}
+.mx-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 14px;border-bottom:1px solid var(--line)}
+.mx-bar h2{margin:0 auto 0 0;font-size:1rem;display:flex;align-items:center;gap:9px}
+.mx-bar h2 small{font-weight:500;font-stretch:100%;color:var(--mute);font-size:.8rem}
+.mx-bar button,.mx-bar select{min-height:40px}
+.mx-bar select{background:var(--panel);color:var(--ink);border:1.5px solid var(--line);border-radius:4px;padding:8px 10px;font:inherit;font-weight:600;cursor:pointer}
+.mx-status{display:flex;align-items:center;gap:9px;padding:9px 14px;border-bottom:1px solid var(--line);font-size:.9rem;color:var(--mute);min-height:40px}
+.mx-status .led{width:9px;height:9px}
+.mx.live .mx-status .led{background:var(--ok);box-shadow:0 0 0 4px color-mix(in srgb,var(--ok) 25%,transparent)}
+.mx.live .mx-status{color:var(--ink)}
+
+/* panggung dengan pola titik tipis supaya ruang kosong terasa disengaja */
+.mx-stage{display:flex;justify-content:center;align-items:center;min-height:clamp(420px,72vh,760px);padding:24px 16px;background:
+  radial-gradient(circle at 1px 1px,color-mix(in srgb,var(--ink) 14%,transparent) 1px,transparent 0) 0 0/22px 22px,
+  color-mix(in srgb,var(--bench) 55%,var(--panel))}
+#stage{display:flex;justify-content:center;align-items:center;width:100%}
+
+/* bingkai ponsel */
+.mx-frame{position:relative;background:#0a1110;padding:12px 10px;border-radius:38px;border:2px solid #243432;box-shadow:0 18px 40px -14px rgba(0,0,0,.55),inset 0 0 0 2px #121d1b;max-width:100%}
+.mx-frame::before{content:"";position:absolute;top:5px;left:50%;width:46px;height:5px;margin-left:-23px;border-radius:3px;background:#1d2b29}
+.mx-frame canvas{display:block;max-width:100%;max-height:calc(72vh - 40px);border-radius:26px;background:#000;touch-action:none;cursor:pointer;outline:none}
+.mx-frame canvas:focus-visible{outline:3px solid var(--amber);outline-offset:3px}
+
+/* tampilan kosong sebelum Mulai */
+.mx-ph{display:flex;flex-direction:column;align-items:center;gap:14px;text-align:center;color:var(--mute);max-width:260px}
+.mx-ph .shape{width:150px;aspect-ratio:9/18.5;border:2px dashed var(--line);border-radius:28px;display:grid;place-items:center}
+.mx-ph .shape svg{width:44px;height:44px;opacity:.7}
+.mx-ph b{display:block;color:var(--ink);margin-bottom:2px}
+.mx-ph span{font-size:.9rem}
+
+.mx-err{margin:0;padding:0 14px 14px}
+.mx-err:empty{display:none}
+
+/* ---------- panel kontrol ---------- */
+.mx-panel{position:sticky;top:16px;background:var(--panel);border:1px solid var(--line);transition:opacity .2s}
+.mx:not(.live) .mx-panel{opacity:.5;pointer-events:none}
+.mx-sec{padding:14px;border-bottom:1px solid var(--line)}
+.mx-sec:last-of-type{border-bottom:0}
+.mx-sec h3{margin:0 0 10px;font-size:.74rem;letter-spacing:.09em;text-transform:uppercase;color:var(--mute);font-weight:700}
+.mx-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.mx-btn{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;min-height:68px;padding:8px 4px;border:1.5px solid var(--line);border-radius:6px;background:var(--bench);font-size:.78rem;font-weight:600;line-height:1.15;text-align:center}
+.mx-btn:hover{border-color:var(--ink)}
+.mx-btn:active{background:var(--amber);border-color:var(--amber);color:#1b1500}
+.mx-btn .ic{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.mx-type{display:flex;gap:8px}
+.mx-type input{min-width:0;flex:1}
+.mx-hint{margin:10px 0 0;font-size:.82rem;color:var(--mute);max-width:none}
+.mx-tip{margin:0;padding:12px 14px;font-size:.85rem;color:var(--mute);border-top:1px solid var(--line);max-width:none}
+
+/* ---------- layar sempit ---------- */
+@media (max-width:980px){
+  .mx{grid-template-columns:minmax(0,1fr)}
+  .mx-panel{position:static}
+  .mx-stage{min-height:0;padding:18px 12px}
+  .mx-frame canvas{max-height:64vh}
+  .mx-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+}
+@media (max-width:420px){
+  .mx-bar h2 small{display:none}
+  .mx-bar{gap:8px}
+}
+@media (prefers-reduced-motion:reduce){.mx-panel{transition:none}}
