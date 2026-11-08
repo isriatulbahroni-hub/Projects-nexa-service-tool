@@ -35,6 +35,12 @@ class ToolRouter:
         "Motorola": ("Motorola Rescue and Smart Assistant (resmi)",),
         "Nokia / HMD": ("Nokia FIH/HMD official tool",),
         "Google Pixel": ("Android Flash Tool (Google resmi)",),
+        "OnePlus": ("Paket firmware resmi OnePlus (OxygenOS) + Fastboot standar",),
+        "Huawei / Honor": ("Huawei HiSuite (resmi)", "HONOR PC Suite (resmi)"),
+        "Sony": ("Sony Xperia Companion (resmi)",),
+        "ASUS": ("ASUS Flash Tool (resmi)",),
+        "Lenovo": ("Lenovo Rescue and Smart Assistant (resmi)",),
+        "itel": ("itel official firmware tool", "Fastboot standar"),
     }
 
     _DEFAULT_TOOLS: tuple[str, ...] = ("ADB standar", "Fastboot standar")

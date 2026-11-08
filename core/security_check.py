@@ -57,13 +57,21 @@ def _check_root(serial: str) -> tuple[bool, str]:
 def run_security_check(serial: str) -> SecurityCheckResult:
     is_rooted, root_indicator = _check_root(serial)
 
+    verified_boot_state = _getprop(serial, "ro.boot.verifiedbootstate")
+
+    # ro.boot.flash.locked tidak ada di semua merek (banyak HP MediaTek dan
+    # Samsung tidak mengisinya), jadi pakai cadangan yang umum.
     bootloader_state = _getprop(serial, "ro.boot.flash.locked")
     if bootloader_state == "0":
         bootloader_state = "Unlocked"
     elif bootloader_state == "1":
         bootloader_state = "Locked"
-
-    verified_boot_state = _getprop(serial, "ro.boot.verifiedbootstate")
+    else:
+        vbmeta = _getprop(serial, "ro.boot.vbmeta.device_state").lower()
+        if vbmeta in ("locked", "unlocked"):
+            bootloader_state = vbmeta.capitalize()
+        elif verified_boot_state.lower() == "orange":
+            bootloader_state = "Unlocked"
     security_patch = _getprop(serial, "ro.build.version.security_patch")
 
     try:
