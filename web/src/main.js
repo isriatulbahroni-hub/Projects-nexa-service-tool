@@ -11,6 +11,7 @@ import { AdbScrcpyClient, AdbScrcpyOptions5_0_1 } from "@yume-chan/adb-scrcpy";
 import { DefaultServerPath } from "@yume-chan/scrcpy";
 import { BitmapVideoFrameRenderer, WebCodecsVideoDecoder } from "@yume-chan/scrcpy-decoder-webcodecs";
 import { renderRepair } from "./repair.js";
+import { attachPkgPicker } from "./picker.js";
 
 // PWA: daftarkan service worker hanya di build produksi
 if ("serviceWorker" in navigator && import.meta.env.PROD) {
@@ -24,6 +25,7 @@ if ("serviceWorker" in navigator && import.meta.env.PROD) {
 // ---------------------------------------------------------------
 let adb = null;
 let device = null;
+let connecting = false;
 let mirrorRunning = false;
 let scrcpyClient = null;
 let scrcpyDecoder = null;
@@ -31,6 +33,7 @@ let currentPage = "dashboard";
 let stopLive = () => {};
 
 const ADB_KEY_STORAGE = "nexa-service-web-adb-key";
+const CONNECT_TRIES = 3;
 
 // scrcpy-server diunduh saat build ke public/ (lihat scripts/fetch-scrcpy-server.mjs)
 const SCRCPY_SERVER_URL = "/scrcpy-server.bin";
@@ -53,6 +56,7 @@ const MIRROR_HELP = `
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const PAGES = [
   ["dashboard", "Dashboard"],
@@ -93,6 +97,13 @@ async function stopMirror() {
   try { decoder?.dispose(); } catch {}
   try { await client?.close(); } catch {}
 }
+
+// Tutup sesi dengan rapi saat tab ditutup/di-refresh supaya HP tidak menggantung
+// pada sesi lama (penyebab koneksi berikutnya lambat atau gagal).
+window.addEventListener("pagehide", () => {
+  try { scrcpyClient?.close(); } catch {}
+  try { adb?.close(); } catch {}
+});
 
 // ---------------------------------------------------------------
 // Layout
@@ -136,19 +147,22 @@ function setConn(text, ok) {
   $("#conn").classList.toggle("on", ok);
   $("#btnConnect").style.display = ok ? "none" : "";
   $("#btnDisconnect").style.display = ok ? "" : "none";
+  $("#btnConnect").disabled = connecting;
 }
 
 function needDevice() {
   $("#view").innerHTML = `
     <div class="empty">
       <h2>Hubungkan HP dulu</h2>
-      <p>Colokkan HP lewat kabel USB, aktifkan <b>USB debugging</b>, lalu tekan <b>Hubungkan HP (USB)</b> dan pilih perangkatnya.</p>
+      <p>Colokkan HP lewat kabel USB, aktifkan <b>USB debugging</b>, lalu tekan <b>Hubungkan HP (USB)</b>. HP yang pernah diizinkan akan tersambung otomatis, tanpa dialog pemilih.</p>
       <p class="muted">Syarat: browser Chrome/Edge (desktop) atau Chrome Android dengan kabel OTG, halaman HTTPS.
       Kalau gagal "Access denied": di komputer jalankan <code>adb kill-server</code> (ADB server bawaan merebut koneksi USB) dan tutup aplikasi lain yang memakai ADB.</p>
       <p>HP tidak bisa menyala atau terkunci? <button data-page="triase">Buka Triase HP</button></p>
-      <div class="row"><button id="forgetKey">Hapus kunci ADB browser ini</button></div>
+      <div class="row"><button id="pickOther">Pilih perangkat lain</button><button id="forgetKey">Hapus kunci ADB browser ini</button></div>
       <p class="muted">Kunci ADB tersimpan di browser ini supaya HP tidak minta izin berulang. Hapus kalau perangkat ini dipinjamkan atau dipakai bersama.</p>
     </div>`;
+  const po = $("#pickOther");
+  if (po) po.onclick = () => connect(true);
   const fk = $("#forgetKey");
   if (fk) {
     fk.onclick = () => {
@@ -178,44 +192,129 @@ async function go(page) {
 // ---------------------------------------------------------------
 // Connection
 // ---------------------------------------------------------------
-async function connect() {
-  const manager = AdbDaemonWebUsbDeviceManager.BROWSER;
-  if (!manager) {
-    alert("Browser ini tidak mendukung WebUSB. Pakai Chrome atau Edge.");
-    return;
-  }
-  try {
-    setConn("Memilih perangkat…", false);
-    device = await manager.requestDevice();
-    if (!device) return setConn("Belum terhubung", false);
+const usbManager = () => AdbDaemonWebUsbDeviceManager.BROWSER;
 
-    setConn("Menghubungkan… (cek layar HP, izinkan USB debugging)", false);
-    const connection = await device.connect();
-    const transport = await adbDaemonAuthenticate({
-      serial: device.serial,
+function showConnectError(e) {
+  $("#view").innerHTML = `<div class="card"><h2 class="fail">Gagal terhubung</h2><pre>${esc(e?.message || e)}</pre>
+    <p class="muted">Kemungkinan penyebab: sesi lama masih menggantung di HP (cabut dan colok kabel lagi), dialog izin USB debugging di HP belum disetujui,
+    atau ADB server di komputer merebut koneksi USB (jalankan <code>adb kill-server</code> lalu coba lagi).</p>
+    <div class="row"><button id="retry" class="primary">Coba lagi</button></div></div>`;
+  const r = $("#retry");
+  if (r) r.onclick = () => connect();
+}
+
+// Satu kali percobaan: buka USB lalu autentikasi. Menampilkan detik berjalan supaya jelas
+// kalau lama karena menunggu dialog izin di HP.
+async function openTransport(dev, label) {
+  const t0 = Date.now();
+  const tick = setInterval(() => {
+    setConn(`${label} ${Math.round((Date.now() - t0) / 1000)} dtk (cek dialog izin di layar HP)`, false);
+  }, 1000);
+  try {
+    const connection = await dev.connect();
+    return await adbDaemonAuthenticate({
+      serial: dev.serial,
       connection,
       credentialManager: new AdbWebCryptoCredentialManager(
         new TangoLocalStorage(ADB_KEY_STORAGE),
         "Nexa Service Tool Web",
       ),
     });
-    adb = new Adb(transport);
-    transport.disconnected.then(() => {
-      adb = null;
-      stopMirror();
-      setConn("Terputus", false);
-      go(currentPage);
-    });
+  } finally {
+    clearInterval(tick);
+  }
+}
 
-    const model = await prop("ro.product.model");
-    setConn(`Terhubung: ${model || device.serial}`, true);
-    go("dashboard");
+async function connectTo(dev, { silent = false } = {}) {
+  if (connecting || adb) return;
+  connecting = true;
+  setConn("Menghubungkan\u2026", false);
+  let lastErr;
+  try {
+    for (let i = 1; i <= CONNECT_TRIES; i++) {
+      try {
+        const label = i > 1 ? `Menghubungkan (percobaan ${i}/${CONNECT_TRIES})\u2026` : "Menghubungkan\u2026";
+        const transport = await openTransport(dev, label);
+        const mine = new Adb(transport);
+        adb = mine;
+        device = dev;
+        transport.disconnected.then(() => {
+          if (adb !== mine) return;
+          adb = null;
+          stopMirror();
+          setConn("Terputus", false);
+          go(currentPage);
+        });
+        const model = await prop("ro.product.model");
+        connecting = false;
+        setConn(`Terhubung: ${model || dev.serial}`, true);
+        go("dashboard");
+        return;
+      } catch (e) {
+        lastErr = e;
+        if (i < CONNECT_TRIES) {
+          setConn(`Gagal, mencoba lagi (${i}/${CONNECT_TRIES - 1})\u2026`, false);
+          await sleep(1500);
+          // handle USB lama bisa rusak setelah gagal; ambil yang baru
+          try {
+            const fresh = await usbManager().getDevices();
+            dev = fresh.find((d) => d.serial === dev.serial) || dev;
+          } catch {}
+        }
+      }
+    }
+    throw lastErr;
+  } catch (e) {
+    adb = null;
+    connecting = false;
+    setConn("Gagal terhubung", false);
+    if (!silent) showConnectError(e);
+  } finally {
+    connecting = false;
+    $("#btnConnect").disabled = false;
+  }
+}
+
+async function connect(forcePicker = false) {
+  const manager = usbManager();
+  if (!manager) {
+    alert("Browser ini tidak mendukung WebUSB. Pakai Chrome atau Edge.");
+    return;
+  }
+  if (connecting) return;
+  try {
+    // HP yang pernah diizinkan dipakai langsung (tanpa dialog pemilih) kalau hanya ada satu.
+    let dev;
+    if (forcePicker !== true) {
+      const known = await manager.getDevices();
+      if (known.length === 1) dev = known[0];
+    }
+    if (!dev) {
+      setConn("Memilih perangkat\u2026", false);
+      dev = await manager.requestDevice();
+    }
+    if (!dev) return setConn("Belum terhubung", false);
+    await connectTo(dev);
   } catch (e) {
     adb = null;
     setConn("Gagal terhubung", false);
-    $("#view").innerHTML = `<div class="card"><h2 class="fail">Gagal terhubung</h2><pre>${esc(e.message || e)}</pre>
-      <p class="muted">Kalau pesannya soal "Access denied" / "claimInterface": jalankan <code>adb kill-server</code> di komputer lalu coba lagi.</p></div>`;
+    showConnectError(e);
   }
+}
+
+// Sambung otomatis saat halaman dibuka atau HP dicolok ulang, hanya untuk HP yang sudah pernah diizinkan.
+async function autoConnect() {
+  const manager = usbManager();
+  if (!manager || adb || connecting) return;
+  try {
+    const known = await manager.getDevices();
+    if (known.length === 1) await connectTo(known[0], { silent: true });
+  } catch {}
+}
+if (navigator.usb) {
+  navigator.usb.addEventListener("connect", () => {
+    if (!adb && !connecting) setTimeout(autoConnect, 1000);
+  });
 }
 
 async function disconnect() {
@@ -258,6 +357,13 @@ async function parseMemory() {
   const total = kb("MemTotal") * 1024, avail = kb("MemAvailable") * 1024;
   if (!total) return null;
   return { total, avail, percentFree: (avail / total) * 100 };
+}
+
+// IMEI: bisa dibaca lewat ADB hanya di Android lama; Android 10+ biasanya memblokirnya.
+async function readImei() {
+  const raw = await sh("service call iphonesubinfo 1 s16 com.android.shell");
+  const digits = [...raw.matchAll(/'([^']*)'/g)].map((m) => m[1]).join("").replace(/\D/g, "");
+  return digits.length === 15 ? digits : null;
 }
 
 const gb = (b) => (b / 1024 ** 3).toFixed(1) + " GB";
@@ -357,9 +463,14 @@ const PAGE_RENDER = {
   },
 
   async info(view) {
-    const raw = await sh("getprop");
+    const [raw, imei] = await Promise.all([sh("getprop"), readImei()]);
     const rows = [...raw.matchAll(/^\[(.+?)\]: \[(.*)\]$/gm)].map((m) => [m[1], m[2]]);
     view.innerHTML = `
+      <div class="card"><h2>IMEI</h2>
+        ${imei
+          ? `<p><b>${esc(imei)}</b></p>`
+          : `<p class="muted">IMEI tidak bisa dibaca lewat ADB di HP ini (Android 10 ke atas memblokirnya). Tekan <b>*#06#</b> di aplikasi telepon HP, atau lihat di Pengaturan, Tentang ponsel.</p>`}
+      </div>
       <div class="card"><h2>Properti sistem (${rows.length})</h2>
         <div class="row"><input id="q" placeholder="Cari properti…" /></div>
         <table id="tbl"></table></div>`;
@@ -441,7 +552,8 @@ const PAGE_RENDER = {
   },
 
   async files(view, path = "/sdcard") {
-    const out = await sh(`ls -la "${path}"`);
+    // /sdcard adalah symlink; tanpa garis miring di akhir, ls hanya menampilkan symlink-nya.
+    const out = await sh(`ls -la "${path.replace(/\/$/, "")}/"`);
     const entries = out.split("\n").slice(1).map((l) => {
       const p = l.trim().split(/\s+/);
       if (p.length < 8) return null;
@@ -464,6 +576,7 @@ const PAGE_RENDER = {
 
   async repair(view) {
     await renderRepair(view, { sh, getAdb: () => adb, esc });
+    attachPkgPicker(view, { sh, esc });
   },
 
   async mirror(view) {
@@ -479,18 +592,34 @@ const PAGE_RENDER = {
           <button data-k="4">◀ Back</button>
           <button data-k="3">⚪ Home</button>
           <button data-k="187">▢ Recents</button>
+          <button data-k="26">⏻ Power</button>
+          <button data-k="25">🔉 Vol−</button>
+          <button data-k="24">🔊 Vol+</button>
+          <button data-fn="notif">🔔 Notifikasi</button>
+          <button data-fn="rotate">⟳ Putar</button>
           <button id="shot">📷 Screenshot</button>
         </div>
+        <div class="row" id="typebar" style="display:none">
+          <input id="typetxt" placeholder="Ketik teks untuk dikirim ke HP…" />
+          <button id="typego">Kirim teks</button>
+        </div>
+        <p class="muted" id="kbhint" style="display:none">Klik layar HP di atas, lalu ketik dengan keyboard komputer dan scroll dengan roda mouse. Untuk HP dengan keyboard layar, kotak "Ketik teks" lebih andal.</p>
         ${MIRROR_HELP}</div>`;
 
     const stat = (t) => { const el = $("#mstat"); if (el) el.textContent = t; };
     const ACTION = { Down: 0, Up: 1, Move: 2 };
     const FINGER = -2n; // pointer id "finger" milik scrcpy
+    const KEYMAP = { Enter: 66, Backspace: 67, Delete: 112, Tab: 61, ArrowUp: 19, ArrowDown: 20, ArrowLeft: 21, ArrowRight: 22, Escape: 4, Home: 3 };
+    const hideControls = () => {
+      for (const id of ["#navbar", "#typebar", "#kbhint"]) {
+        const el = $(id);
+        if (el) el.style.display = "none";
+      }
+    };
 
     $("#stop").onclick = async () => {
       await stopMirror();
-      const nb = $("#navbar");
-      if (nb) nb.style.display = "none";
+      hideControls();
       stat("Berhenti.");
     };
 
@@ -506,6 +635,9 @@ const PAGE_RENDER = {
         const server = new Uint8Array(await res.arrayBuffer());
         // jar = zip, harus diawali "PK"
         if (!(server[0] === 0x50 && server[1] === 0x4b)) throw new Error("File server scrcpy tidak valid.");
+
+        // sisa server dari sesi sebelumnya (mis. setelah refresh) bisa menahan koneksi
+        await sh('pkill -f "[c]om.genymobile.scrcpy.Server"');
 
         stat("Mengirim server ke HP…");
         await AdbScrcpyClient.pushServer(
@@ -537,10 +669,12 @@ const PAGE_RENDER = {
         if (!stage) return;
         const canvas = document.createElement("canvas");
         canvas.className = "screen";
+        canvas.tabIndex = 0;
         canvas.style.touchAction = "none";
         canvas.style.maxWidth = "100%";
         canvas.style.maxHeight = "75vh";
         canvas.style.cursor = "pointer";
+        canvas.style.outline = "none";
         stage.replaceChildren(canvas);
 
         const decoder = new WebCodecsVideoDecoder({
@@ -550,15 +684,23 @@ const PAGE_RENDER = {
         scrcpyDecoder = decoder;
         stream.pipeTo(decoder.writable).catch(() => {});
 
+        const ctrl = () => scrcpyClient?.controller;
+        const report = (e) => stat("Gagal: " + (e?.message || e));
+        const rel = (e) => {
+          const rect = canvas.getBoundingClientRect();
+          return [
+            Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width)),
+            Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height)),
+          ];
+        };
+
         // --- kontrol sentuh ---
         let pressed = false;
         const touch = (action, e) => {
-          const ctrl = scrcpyClient?.controller;
-          if (!ctrl || !canvas.width || !canvas.height) return;
-          const rect = canvas.getBoundingClientRect();
-          const x = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-          const y = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
-          ctrl.injectTouch({
+          const c = ctrl();
+          if (!c || !canvas.width || !canvas.height) return;
+          const [x, y] = rel(e);
+          c.injectTouch({
             action,
             pointerId: FINGER,
             pointerX: Math.round(x * canvas.width),
@@ -572,6 +714,7 @@ const PAGE_RENDER = {
         };
         canvas.addEventListener("pointerdown", (e) => {
           e.preventDefault();
+          canvas.focus();
           pressed = true;
           canvas.setPointerCapture(e.pointerId);
           touch(ACTION.Down, e);
@@ -581,18 +724,65 @@ const PAGE_RENDER = {
         canvas.addEventListener("pointerup", release);
         canvas.addEventListener("pointercancel", release);
 
-        // --- tombol navigasi & screenshot ---
+        // --- scroll roda mouse ---
+        canvas.addEventListener("wheel", (e) => {
+          const c = ctrl();
+          if (!c || !canvas.width || !canvas.height) return;
+          e.preventDefault();
+          const [x, y] = rel(e);
+          const clamp = (v) => Math.max(-1, Math.min(1, v));
+          c.injectScroll({
+            pointerX: Math.round(x * canvas.width),
+            pointerY: Math.round(y * canvas.height),
+            videoWidth: canvas.width,
+            videoHeight: canvas.height,
+            scrollX: clamp(-e.deltaX / 100),
+            scrollY: clamp(-e.deltaY / 100),
+            buttons: 0,
+          }).catch(() => {});
+        }, { passive: false });
+
+        // --- keyboard komputer ---
+        canvas.addEventListener("keydown", (e) => {
+          const c = ctrl();
+          if (!c || e.ctrlKey || e.metaKey || e.altKey) return;
+          if (e.key.length === 1) {
+            e.preventDefault();
+            c.injectText(e.key).catch(report);
+            return;
+          }
+          const keyCode = KEYMAP[e.key];
+          if (keyCode) {
+            e.preventDefault();
+            (async () => {
+              await c.injectKeyCode({ action: 0, keyCode, repeat: 0, metaState: 0 });
+              await c.injectKeyCode({ action: 1, keyCode, repeat: 0, metaState: 0 });
+            })().catch(report);
+          }
+        });
+
+        // --- tombol navigasi, fungsi, dan screenshot ---
         const nb = $("#navbar");
         nb.style.display = "";
         nb.querySelectorAll("button[data-k]").forEach((b) => {
           b.onclick = async () => {
-            const ctrl = scrcpyClient?.controller;
-            if (!ctrl) return;
+            const c = ctrl();
+            if (!c) return;
             const keyCode = Number(b.dataset.k);
             try {
-              await ctrl.injectKeyCode({ action: 0, keyCode, repeat: 0, metaState: 0 });
-              await ctrl.injectKeyCode({ action: 1, keyCode, repeat: 0, metaState: 0 });
-            } catch {}
+              await c.injectKeyCode({ action: 0, keyCode, repeat: 0, metaState: 0 });
+              await c.injectKeyCode({ action: 1, keyCode, repeat: 0, metaState: 0 });
+            } catch (e) { report(e); }
+          };
+        });
+        nb.querySelectorAll("button[data-fn]").forEach((b) => {
+          b.onclick = async () => {
+            const c = ctrl();
+            if (!c) return;
+            try {
+              if (b.dataset.fn === "notif") await c.expandNotificationPanel();
+              else if (b.dataset.fn === "rotate") await c.rotateDevice();
+            } catch (e) { report(e); }
           };
         });
         $("#shot").onclick = async () => {
@@ -605,10 +795,29 @@ const PAGE_RENDER = {
           setTimeout(() => URL.revokeObjectURL(a.href), 1000);
         };
 
-        stat(`Terhubung · ${canvas.width}×${canvas.height}`);
+        // --- kirim teks ---
+        $("#typebar").style.display = "";
+        $("#kbhint").style.display = "";
+        const sendText = async () => {
+          const input = $("#typetxt");
+          const c = ctrl();
+          if (!c || !input.value) return;
+          try {
+            await c.injectText(input.value);
+            input.value = "";
+          } catch (e) { report(e); }
+        };
+        $("#typego").onclick = sendText;
+        $("#typetxt").onkeydown = (e) => { if (e.key === "Enter") sendText(); };
+
+        stat("Terhubung · menunggu gambar…");
+        setTimeout(() => {
+          if (scrcpyClient === client) stat(`Terhubung · ${canvas.width}×${canvas.height}`);
+        }, 1500);
       } catch (e) {
         await stopMirror();
         stat("");
+        hideControls();
         const stage = $("#stage");
         if (stage) stage.innerHTML = `<pre class="fail">${esc(e.message || e)}</pre>`;
       }
@@ -706,3 +915,4 @@ async function runHardwareTests() {
 // ---------------------------------------------------------------
 needDevice();
 go("dashboard");
+autoConnect();
