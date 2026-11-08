@@ -12,17 +12,30 @@ dipakai sebagai cadangan.
 | `core/realtime_mirror.py` | Pembungkus Qt (`RealtimeMirror`), API mirip `ScreenMirror`; hanya frame terbaru dikirim ke GUI |
 | `core/wireless_adb.py` | `adb pair` (kode & QR), `adb connect`, mDNS, USB → Wi-Fi |
 | `ui/realtime_mirror_page.py` | `RealtimeMirrorPanel` (widget mandiri) |
+| `ui/mirror_integration.py` | Memasang panel ke halaman Screen Mirror `MainWindow` |
 
-## Memasang panel di app.py
+## Terpasang di halaman Screen Mirror
 
-Panel mandiri: punya daftar perangkat sendiri, jadi tidak bergantung pada perangkat
-terpilih di bagian lain aplikasi.
+`main.py` memanggil `ui.mirror_integration.install_realtime_mirror(MainWindow)` sebelum
+jendela dibuat. Halaman **Screen Mirror** lalu memakai `RealtimeMirrorPanel` (scrcpy)
+menggantikan polling `screencap` lama (±1 fps). Saat membuka halaman, perangkat yang
+sedang aktif otomatis dipilih; stream dihentikan otomatis saat pindah halaman / app ditutup.
+
+Untuk memakai panel di tempat lain:
 
 ```python
 from ui.realtime_mirror_page import RealtimeMirrorPanel
 
-page = RealtimeMirrorPanel()   # daftarkan seperti halaman lain di sidebar
+page = RealtimeMirrorPanel()
 ```
+
+## Tuning performa
+
+- Lewat Wi-Fi (serial `IP:port`) otomatis memakai profil ringan: 960 px, 30 fps, 3 Mbps.
+  Lewat USB: 1280 px, 60 fps, 8 Mbps. Ubah di `RealtimeMirrorPanel.stream_profile`.
+- Decoder H.264 dalam mode low-delay; jika PC tertinggal, konversi RGB frame usang dilewati.
+- Di build `.exe`, scrcpy-server disimpan di `%LOCALAPPDATA%\NexaServiceTool\vendor`
+  (bukan folder temp PyInstaller) sehingga tidak diunduh ulang tiap dijalankan.
 
 ## Catatan
 
