@@ -1,4 +1,4 @@
-﻿from core.frp_verification import (
+from core.frp_verification import (
     collect_frp_verification,
     _parse_getprop,
 )
@@ -10,8 +10,6 @@ def test_parse_getprop():
 [ro.product.model]: [X6833B]
 [ro.build.version.release]: [14]
 [ro.build.id]: [UP1A.231005.007]
-[ro.setupwizard.user_setup_complete]: [1]
-[sys.device_provisioned]: [1]
 """
 
     props = _parse_getprop(output)
@@ -21,22 +19,32 @@ def test_parse_getprop():
     assert props["ro.build.version.release"] == "14"
 
 
-def test_setup_complete():
-    def fake_runner(serial, command):
-        assert serial == "TEST123"
-
-        return """
+_GETPROP_OUTPUT = """
 [ro.product.manufacturer]: [Infinix]
 [ro.product.model]: [X6833B]
 [ro.build.version.release]: [14]
 [ro.build.id]: [TEST]
-[ro.setupwizard.user_setup_complete]: [1]
-[sys.device_provisioned]: [1]
 """
 
+
+def _make_runner(setup_complete: str, device_provisioned: str):
+    def fake_runner(serial, command):
+        assert serial == "TEST123"
+        if command == "getprop":
+            return _GETPROP_OUTPUT
+        if "user_setup_complete" in command:
+            return setup_complete
+        if "device_provisioned" in command:
+            return device_provisioned
+        raise AssertionError(f"Unexpected command: {command}")
+
+    return fake_runner
+
+
+def test_setup_complete():
     result = collect_frp_verification(
         "TEST123",
-        runner=fake_runner,
+        runner=_make_runner("1", "1"),
     )
 
     assert result.manufacturer == "Infinix"
@@ -49,17 +57,11 @@ def test_setup_complete():
 
 
 def test_unknown_requires_owner_verification():
-    def fake_runner(serial, command):
-        return """
-[ro.product.manufacturer]: [Infinix]
-[ro.product.model]: [X6833B]
-[ro.build.version.release]: [14]
-[ro.build.id]: [TEST]
-"""
-
+    # `settings get` pada key yang tidak ada mengembalikan literal "null"
+    # di Android sungguhan, bukan string kosong.
     result = collect_frp_verification(
         "TEST123",
-        runner=fake_runner,
+        runner=_make_runner("null", "null"),
     )
 
     assert result.frp_status == "UNKNOWN"
@@ -67,19 +69,9 @@ def test_unknown_requires_owner_verification():
 
 
 def test_incomplete_setup_requires_owner_verification():
-    def fake_runner(serial, command):
-        return """
-[ro.product.manufacturer]: [Infinix]
-[ro.product.model]: [X6833B]
-[ro.build.version.release]: [14]
-[ro.build.id]: [TEST]
-[ro.setupwizard.user_setup_complete]: [0]
-[sys.device_provisioned]: [0]
-"""
-
     result = collect_frp_verification(
         "TEST123",
-        runner=fake_runner,
+        runner=_make_runner("0", "0"),
     )
 
     assert result.frp_status == "OWNER VERIFICATION REQUIRED"
