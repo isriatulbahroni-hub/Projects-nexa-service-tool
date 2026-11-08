@@ -16,9 +16,11 @@ import hashlib
 import os
 import secrets
 import shutil
+import select
 import socket
 import struct
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -33,7 +35,25 @@ SERVER_URL = (
     f"v{SCRCPY_VERSION}/scrcpy-server-v{SCRCPY_VERSION}"
 )
 REMOTE_JAR = "/data/local/tmp/nexa-scrcpy-server.jar"
-VENDOR_DIR = Path(__file__).resolve().parent.parent / "vendor"
+
+
+def _default_vendor_dir() -> Path:
+    """Lokasi cache scrcpy-server.
+
+    Saat jalan dari source: folder `vendor/` di samping proyek. Saat dibungkus
+    PyInstaller (--onefile), folder program adalah direktori temp yang dihapus
+    tiap aplikasi ditutup - server 70 KB akan diunduh ulang setiap kali Mulai
+    (lambat, dan gagal total kalau PC offline). Karena itu pakai folder data
+    pengguna yang permanen.
+    """
+    if getattr(sys, "frozen", False):
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_DATA_HOME") \
+            or str(Path.home() / ".local" / "share")
+        return Path(base) / "NexaServiceTool" / "vendor"
+    return Path(__file__).resolve().parent.parent / "vendor"
+
+
+VENDOR_DIR = _default_vendor_dir()
 
 CODEC_H264 = 0x68323634  # "h264"
 PACKET_FLAG_CONFIG = 1 << 62
@@ -178,6 +198,30 @@ def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def _has_pending_data(sock: socket.socket | None) -> bool:
+    if sock is None:
+        return False
+    try:
+        readable, _, _ = select.select([sock], [], [], 0)
+    except (OSError, ValueError):
+        return False
+    return bool(readable)
+
+
+def _configure_low_latency(decoder) -> None:
+    """Matikan buffering internal decoder H.264 (frame-threading menahan beberapa
+    frame sebelum keluar = delay tambahan yang terasa sebagai 'lambat').
+    Dibungkus try karena nama opsi bisa beda antar versi PyAV/FFmpeg."""
+    try:
+        decoder.thread_type = "SLICE"
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        decoder.options = {"flags": "low_delay", "flags2": "fast"}
+    except Exception:  # noqa: BLE001
+        pass
 
 
 class ScrcpyClient:
@@ -367,8 +411,10 @@ class ScrcpyClient:
             raise ScrcpyError("Library 'av' (PyAV) belum terpasang. Jalankan: pip install av") from exc
 
         decoder = av.CodecContext.create("h264", "r")
+        _configure_low_latency(decoder)
         config: bytes | None = None
         started = False
+        skipped = 0  # berapa frame beruntun yang konversi RGB-nya dilewati
 
         while not self._stop.is_set():
             header = _recv_exact(self._vsock, 12)
@@ -399,6 +445,15 @@ class ScrcpyClient:
                 last = frame
             if last is None:
                 continue
+
+            # Kalau masih ada paket menunggu di socket, berarti PC tertinggal dari
+            # HP. Frame ini pasti akan segera tertimpa, jadi lewati konversi RGB
+            # (bagian paling mahal) agar decoder mengejar - dibatasi 4 frame
+            # beruntun supaya layar tetap bergerak.
+            if skipped < 4 and _has_pending_data(self._vsock):
+                skipped += 1
+                continue
+            skipped = 0
 
             rgb = last.reformat(format="rgb24")
             plane = rgb.planes[0]

@@ -209,6 +209,7 @@ class RealtimeMirrorPanel(QWidget):
         super().__init__(parent)
         self._mirror: RealtimeMirror | None = None
         self._workers: set[_Worker] = set()
+        self._preferred_serial: str | None = None
 
         root = QVBoxLayout(self)
 
@@ -307,7 +308,7 @@ class RealtimeMirrorPanel(QWidget):
         from core.adb import get_devices_with_state
 
         def done(devs: dict):
-            current = self.devices.currentData()
+            current = self._preferred_serial or self.devices.currentData()
             self.devices.clear()
             for serial, state in devs.items():
                 self.devices.addItem(f"{serial}  [{state}]", serial)
@@ -318,6 +319,24 @@ class RealtimeMirrorPanel(QWidget):
 
         self._bg(get_devices_with_state, done)
 
+    def select_serial(self, serial: str | None):
+        """Pilih perangkat tertentu (mis. yang sedang aktif di bagian lain app)."""
+        self._preferred_serial = serial or None
+        idx = self.devices.findData(serial) if serial else -1
+        if idx >= 0:
+            self.devices.setCurrentIndex(idx)
+        else:
+            self.refresh_devices()
+
+    @staticmethod
+    def stream_profile(serial: str) -> dict:
+        """Profil stream. Lewat Wi-Fi (serial berbentuk IP:port) bandwidth dan
+        latensinya jauh lebih buruk dari USB: 8 Mbps/60 fps di Wi-Fi bikin
+        paket menumpuk dan gambar terasa tertinggal beberapa detik."""
+        if ":" in serial:
+            return {"max_size": 960, "max_fps": 30, "bit_rate": 3_000_000}
+        return {"max_size": 1280, "max_fps": 60, "bit_rate": 8_000_000}
+
     # -- mirror ---------------------------------------------------------------------
     def start_mirror(self):
         serial = self.devices.currentData()
@@ -327,7 +346,8 @@ class RealtimeMirrorPanel(QWidget):
         self.stop_mirror()
         from core.adb import _resolve_adb_path
 
-        self._mirror = RealtimeMirror(serial, _resolve_adb_path(), self)
+        self._mirror = RealtimeMirror(serial, _resolve_adb_path(), self,
+                                      **self.stream_profile(serial))
         self._mirror.frame_ready.connect(self.view.set_image)
         self._mirror.started.connect(self._on_started)
         self._mirror.resized.connect(self.view.set_device_size)
@@ -351,8 +371,13 @@ class RealtimeMirrorPanel(QWidget):
         self.view.setFocus()
 
     def _on_stopped(self):
+        if self.sender() is not None and self.sender() is not self._mirror:
+            return  # sinyal dari sesi lama yang sudah diganti
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
+
+    def is_mirroring(self) -> bool:
+        return self._mirror is not None and self._mirror.is_running()
 
     # -- Wi-Fi ----------------------------------------------------------------------
     def _do_connect(self):
