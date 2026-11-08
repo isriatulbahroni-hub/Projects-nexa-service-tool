@@ -1,0 +1,234 @@
+// Uji manual / interaktif untuk halaman Hardware Test (versi web).
+// Pemeriksaan otomatis di main.js hanya membaca data; komponen seperti getaran, suara,
+// layar, dan tombol fisik harus dirasakan atau ditekan langsung oleh teknisi.
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const BAD = /unknown|usage|error|exception|not found|inaccessible|no such|permission|denied|invalid|unsupported/i;
+
+const TESTS = [
+  {
+    id: "vib",
+    name: "Getaran (motor vibrator)",
+    hint: "Pegang HP lalu rasakan getarannya. Lepas casing kalau perlu.",
+    actions: [["short", "Getar 1 detik"], ["pattern", "Pola 3×"]],
+    confirm: true,
+  },
+  {
+    id: "snd",
+    name: "Suara (speaker)",
+    hint: "Memunculkan notifikasi uji. Pastikan HP tidak mode senyap dan volume notifikasi tidak nol.",
+    actions: [["play", "Bunyikan"]],
+    confirm: true,
+  },
+  {
+    id: "bri",
+    name: "Kecerahan layar",
+    hint: "Layar akan terang penuh, redup, lalu kembali ke pengaturan semula.",
+    actions: [["run", "Uji terang–redup"]],
+    confirm: true,
+  },
+  {
+    id: "key",
+    name: "Tombol fisik (Vol+, Vol−, Power)",
+    hint: "Tekan tombol yang diminta dalam 8 detik. Layar bisa mati saat Power ditekan.",
+    actions: [["run", "Mulai uji tombol"]],
+    confirm: false,
+  },
+  {
+    id: "usb",
+    name: "Port USB / pengisian",
+    hint: "Membaca status daya dari kabel yang sedang terpasang.",
+    actions: [["run", "Cek"]],
+    confirm: false,
+  },
+];
+
+const CLS = { PASS: "pass", WARN: "warn", FAIL: "fail", INFO: "info" };
+
+// ---------------------------------------------------------------
+// Getaran
+// ---------------------------------------------------------------
+// Sintaks berbeda antar versi Android; coba berurutan sampai salah satu diterima.
+const vibCommands = (ms) => [
+  `cmd vibrator_manager synced -f oneshot ${ms}`,
+  `cmd vibrator_manager synced -f oneshot -a ${ms} 255`,
+  `cmd vibrator_manager synced -f -d nexa oneshot ${ms}`,
+  `cmd vibrator vibrate -f ${ms} nexa`,
+  `cmd vibrator vibrate ${ms} nexa`,
+];
+
+let lastVibCmdIndex = 0;
+async function vibrate(sh, ms) {
+  const cmds = vibCommands(ms);
+  // mulai dari perintah yang terakhir berhasil
+  const order = [...cmds.slice(lastVibCmdIndex), ...cmds.slice(0, lastVibCmdIndex)];
+  for (const c of order) {
+    const out = await sh(c);
+    if (!BAD.test(out)) {
+      lastVibCmdIndex = cmds.indexOf(c);
+      return { ok: true, cmd: c };
+    }
+  }
+  return { ok: false };
+}
+
+async function vibratorInfo(sh) {
+  const list = await sh("cmd vibrator_manager list");
+  const dump = await sh("dumpsys vibrator_manager | head -30");
+  const sys = await sh("ls /sys/class/timed_output /sys/class/leds/vibrator 2>/dev/null");
+  return [`# cmd vibrator_manager list\n${list || "(kosong)"}`, `# dumpsys vibrator_manager\n${dump || "(kosong)"}`, `# /sys\n${sys || "(tidak ada)"}`].join("\n\n");
+}
+
+// ---------------------------------------------------------------
+// Render
+// ---------------------------------------------------------------
+export function renderManualTests(root, { sh, esc }) {
+  if (!root) return;
+  root.innerHTML = `
+    <div class="card"><h2>Uji manual (interaktif)</h2>
+      <p class="muted">Pemeriksaan di atas hanya membaca data. Komponen di bawah harus dirasakan atau ditekan langsung. Setelah tes jalan, tekan <b>Normal</b> atau <b>Bermasalah</b> sesuai yang kamu rasakan.</p>
+      <table id="mtbl">
+        <tr><th>Uji</th><th>Status</th><th>Aksi</th></tr>
+        ${TESTS.map((t) => `
+        <tr data-t="${t.id}">
+          <td><b>${esc(t.name)}</b><br><span class="muted">${esc(t.hint)}</span></td>
+          <td class="mt-st info">Belum diuji</td>
+          <td>
+            <div class="row">${t.actions.map(([a, l]) => `<button data-t="${t.id}" data-a="${a}">${esc(l)}</button>`).join("")}</div>
+            ${t.confirm ? `<div class="row mt-confirm" style="display:none"><button data-t="${t.id}" data-ok="1">✔ Normal</button><button data-t="${t.id}" data-ok="0">✖ Bermasalah</button></div>` : ""}
+            <div class="muted mt-note"></div>
+          </td>
+        </tr>`).join("")}
+      </table>
+      <details class="help" style="margin-top:10px"><summary><b>Detail teknis getaran</b></summary><pre id="vibinfo">Tekan tombol di bawah untuk membaca info vibrator.</pre><div class="row"><button id="vibinfoBtn">Baca info vibrator</button></div></details>
+    </div>`;
+
+  const row = (id) => root.querySelector(`tr[data-t="${id}"]`);
+  const setStatus = (id, status, note) => {
+    const r = row(id);
+    if (!r) return;
+    const st = r.querySelector(".mt-st");
+    st.className = `mt-st ${CLS[status] || "info"}`;
+    st.textContent = status === "INFO" ? "Berjalan…" : status;
+    if (note !== undefined) r.querySelector(".mt-note").textContent = note;
+  };
+  const showConfirm = (id, on) => {
+    const c = row(id)?.querySelector(".mt-confirm");
+    if (c) c.style.display = on ? "" : "none";
+  };
+  const note = (id, t) => { const n = row(id)?.querySelector(".mt-note"); if (n) n.textContent = t; };
+
+  let busy = false;
+  const lock = (on) => { busy = on; root.querySelectorAll("button").forEach((b) => { b.disabled = on; }); };
+
+  const RUN = {
+    async vib(a) {
+      setStatus("vib", "INFO", "Getar dikirim…");
+      if (a === "short") {
+        const r = await vibrate(sh, 1000);
+        if (!r.ok) { setStatus("vib", "WARN", "Perintah getar ditolak HP ini. Lihat Detail teknis getaran."); return; }
+        note("vib", "Perintah getar terkirim. Terasa?");
+      } else {
+        let ok = true;
+        for (let i = 0; i < 3 && ok; i++) {
+          ok = (await vibrate(sh, 350)).ok;
+          await sleep(700);
+        }
+        if (!ok) { setStatus("vib", "WARN", "Perintah getar ditolak HP ini. Lihat Detail teknis getaran."); return; }
+        note("vib", "3 getaran terkirim. Terasa semuanya?");
+      }
+      setStatus("vib", "INFO");
+      row("vib").querySelector(".mt-st").textContent = "Menunggu penilaian";
+      showConfirm("vib", true);
+    },
+
+    async snd() {
+      setStatus("snd", "INFO", "Memunculkan notifikasi…");
+      const out = await sh('cmd notification post -S bigtext -t "Nexa Service Tool" nexa_test "Uji suara speaker"');
+      if (BAD.test(out)) { setStatus("snd", "WARN", "HP menolak perintah notifikasi. Uji suara lewat Mirror: putar video/nada dering."); return; }
+      row("snd").querySelector(".mt-st").textContent = "Menunggu penilaian";
+      note("snd", "Notifikasi terkirim. Terdengar bunyinya?");
+      showConfirm("snd", true);
+    },
+
+    async bri() {
+      setStatus("bri", "INFO", "Mengubah kecerahan…");
+      const oldVal = (await sh("settings get system screen_brightness")).trim();
+      const oldMode = (await sh("settings get system screen_brightness_mode")).trim();
+      try {
+        await sh("settings put system screen_brightness_mode 0");
+        await sh("settings put system screen_brightness 255");
+        note("bri", "Terang penuh…");
+        await sleep(1500);
+        await sh("settings put system screen_brightness 15");
+        note("bri", "Redup…");
+        await sleep(1500);
+      } finally {
+        if (/^\d+$/.test(oldVal)) await sh(`settings put system screen_brightness ${oldVal}`);
+        if (/^\d+$/.test(oldMode)) await sh(`settings put system screen_brightness_mode ${oldMode}`);
+      }
+      row("bri").querySelector(".mt-st").textContent = "Menunggu penilaian";
+      note("bri", "Pengaturan dikembalikan. Layar berubah terang lalu redup dengan mulus?");
+      showConfirm("bri", true);
+    },
+
+    async key() {
+      const keys = [
+        ["Volume +", /KEY_VOLUMEUP/],
+        ["Volume −", /KEY_VOLUMEDOWN/],
+        ["Power", /KEY_POWER/],
+      ];
+      const results = [];
+      let unsupported = false;
+      for (const [label, re] of keys) {
+        setStatus("key", "INFO", `Tekan ${label} sekarang (8 detik)…`);
+        const out = await sh("timeout 8 getevent -lq");
+        if (/not found|inaccessible|permission denied/i.test(out)) { unsupported = true; break; }
+        results.push([label, re.test(out)]);
+      }
+      if (unsupported) { setStatus("key", "WARN", "HP ini tidak mengizinkan getevent lewat ADB. Uji tombol manual lewat Mirror."); return; }
+      const failed = results.filter(([, ok]) => !ok).map(([l]) => l);
+      setStatus("key", failed.length ? "FAIL" : "PASS",
+        failed.length ? `Tidak terdeteksi: ${failed.join(", ")}.` : "Semua tombol terdeteksi.");
+    },
+
+    async usb() {
+      setStatus("usb", "INFO", "Membaca…");
+      const raw = await sh("dumpsys battery");
+      const usb = /USB powered: true/.test(raw);
+      const ac = /AC powered: true/.test(raw);
+      const wireless = /Wireless powered: true/.test(raw);
+      if (usb || ac || wireless) setStatus("usb", "PASS", `Menerima daya (${[usb && "USB", ac && "AC", wireless && "Wireless"].filter(Boolean).join(", ")}).`);
+      else setStatus("usb", "WARN", "HP tidak menerima daya dari kabel. Coba kabel/port lain; kalau tetap, curiga port pengisian atau konektor rusak.");
+    },
+  };
+
+  root.onclick = async (e) => {
+    const btn = e.target.closest("button");
+    if (!btn || busy) return;
+    if (btn.id === "vibinfoBtn") {
+      lock(true);
+      try { root.querySelector("#vibinfo").textContent = "Membaca…"; root.querySelector("#vibinfo").textContent = await vibratorInfo(sh); }
+      finally { lock(false); }
+      return;
+    }
+    const id = btn.dataset.t;
+    if (!id) return;
+    if (btn.dataset.ok != null) {
+      setStatus(id, btn.dataset.ok === "1" ? "PASS" : "FAIL");
+      showConfirm(id, false);
+      return;
+    }
+    const action = btn.dataset.a;
+    if (!action || !RUN[id]) return;
+    lock(true);
+    showConfirm(id, false);
+    try {
+      await RUN[id](action);
+    } catch (err) {
+      setStatus(id, "WARN", `Gagal: ${err?.message || err}`);
+    } finally {
+      lock(false);
+    }
+  };
+}
