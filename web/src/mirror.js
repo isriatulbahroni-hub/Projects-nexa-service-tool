@@ -1,9 +1,9 @@
 // Screen Mirror (scrcpy) untuk versi web.
 // Dipisah dari main.js supaya alur start bisa dioptimalkan sendiri:
 //  - server scrcpy diunduh di latar belakang saat halaman dibuka (bukan saat tombol Mulai ditekan)
+//  - server dikirim ke HP sebagai SATU aliran data (cat > file), bukan potongan-potongan kecil
 //  - server tidak dikirim ulang ke HP kalau file yang sama sudah ada
-//  - tiap tahap punya batas waktu, jadi tidak menggantung selamanya di "Mengirim server ke HP..."
-//  - kalau push lewat sync macet, otomatis pindah ke push lewat shell (base64)
+//  - tiap tahap punya batas waktu dan dicatat lamanya, supaya yang lambat kelihatan
 //  - profil kualitas Ringan / Normal / Tajam
 //  - tata letak dua kolom: layar HP dalam bingkai ponsel + panel kontrol (lihat mirror.css)
 import "./mirror.css";
@@ -91,7 +91,19 @@ function withTimeout(promise, ms, message) {
   ]).finally(() => clearTimeout(t));
 }
 
-// Kirim sebagai potongan kecil supaya tidak menyumbat buffer USB.
+async function readAll(stream) {
+  const reader = stream.getReader();
+  const dec = new TextDecoder();
+  let s = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    s += dec.decode(value, { stream: true });
+  }
+  return s;
+}
+
+// Kirim sebagai potongan kecil untuk jalur sync (cadangan).
 function chunkedStream(bytes, size = 32 * 1024) {
   let off = 0;
   return new ReadableStream({
@@ -103,32 +115,28 @@ function chunkedStream(bytes, size = 32 * 1024) {
   });
 }
 
-function toBase64(bytes) {
-  let bin = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) {
-    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-  }
-  return btoa(bin);
-}
-
 async function remoteSize(sh, path) {
   const out = await sh(`ls -l ${path} 2>/dev/null`);
   const m = out.match(/\s(\d+)\s+\d{4}-\d{2}-\d{2}/);
   return m ? Number(m[1]) : null;
 }
 
-// Cadangan: tulis file lewat shell (base64). Lambat-lambat tapi tidak bergantung pada protokol sync.
-async function pushViaShell(sh, bytes, path, onProgress) {
+// Jalur utama: satu aliran data ke `cat > file`. Satu perjalanan USB, tanpa protokol sync.
+// (Cara yang sama dipakai tombol Install APK di halaman Perbaikan.)
+async function pushViaStdin(adb, sh, bytes, path) {
   await sh(`rm -f ${path}`);
-  const STEP = 6000;
+  const proc = await adb.subprocess.noneProtocol.spawn(`cat > ${path}`);
+  const outP = readAll(proc.output).catch(() => "");
+  const writer = proc.stdin.getWriter();
+  const STEP = 32 * 1024;
   for (let off = 0; off < bytes.length; off += STEP) {
-    const b64 = toBase64(bytes.subarray(off, off + STEP));
-    await sh(`echo '${b64}' | base64 -d >> ${path}`);
-    onProgress?.(Math.min(100, Math.round(((off + STEP) / bytes.length) * 100)));
+    await writer.write(bytes.subarray(off, off + STEP));
   }
+  await writer.close();
+  await outP;
   await sh(`chmod 644 ${path}`);
   const size = await remoteSize(sh, path);
-  if (size !== bytes.length) throw new Error("Push lewat shell tidak lengkap (ukuran file di HP tidak cocok).");
+  if (size !== bytes.length) throw new Error("Ukuran file di HP tidak cocok setelah dikirim.");
 }
 
 // ---------------------------------------------------------------
@@ -235,6 +243,11 @@ export function renderMirror(view, { sh, getAdb, helpHtml }) {
     const setStep = (s) => { step = s; stat(`${s} (${Math.round((performance.now() - t0) / 1000)} dtk)`); };
     const alive = () => running;
 
+    // catat lama tiap tahap supaya kelihatan mana yang lambat
+    const laps = [];
+    let lapAt = t0;
+    const lap = (name) => { const now = performance.now(); laps.push(`${name} ${((now - lapAt) / 1000).toFixed(1)}`); lapAt = now; };
+
     try {
       if (!adb) throw new Error("HP belum terhubung.");
       if (typeof VideoDecoder === "undefined") throw new Error("Browser ini tidak mendukung WebCodecs. Pakai Chrome atau Edge terbaru.");
@@ -247,23 +260,26 @@ export function renderMirror(view, { sh, getAdb, helpHtml }) {
         sh('pkill -f "[c]om.genymobile.scrcpy.Server"'),
         remoteSize(sh, DefaultServerPath),
       ]);
+      lap("siapkan");
       if (!alive()) return;
 
       // 2) kirim server hanya kalau belum ada di HP
       if (existing === server.length) {
         setStep("Server sudah ada di HP, lewati pengiriman");
+        lap("kirim (lewati)");
       } else {
         setStep("Mengirim server ke HP");
         try {
+          await withTimeout(pushViaStdin(adb, sh, server, DefaultServerPath), 15000, "Pengiriman utama macet.");
+        } catch (e) {
+          setStep("Jalur utama gagal, mencoba jalur sync");
           await withTimeout(
             AdbScrcpyClient.pushServer(adb, chunkedStream(server), DefaultServerPath),
-            10000,
-            "Push sync macet.",
+            15000,
+            "Server tidak bisa dikirim ke HP. Cabut dan colok kabel USB, lalu coba lagi.",
           );
-        } catch (e) {
-          setStep("Push cepat macet, memakai jalur cadangan");
-          await pushViaShell(sh, server, DefaultServerPath, (p) => setStep(`Mengirim server (cadangan) ${p}%`));
         }
+        lap("kirim");
       }
       if (!alive()) return;
 
@@ -284,6 +300,7 @@ export function renderMirror(view, { sh, getAdb, helpHtml }) {
         15000,
         "scrcpy tidak merespons di HP. Cabut dan colok kabel USB, lalu coba lagi.",
       );
+      lap("mulai");
       if (!alive()) { await started.close(); return; }
       client = started;
 
@@ -304,6 +321,7 @@ export function renderMirror(view, { sh, getAdb, helpHtml }) {
         10000,
         "HP tidak mengirim gambar. Pastikan layar HP menyala dan USB debugging diizinkan.",
       );
+      lap("gambar");
       const stage = $("#stage");
       if (!stage) return;
       const canvas = document.createElement("canvas");
@@ -445,14 +463,15 @@ export function renderMirror(view, { sh, getAdb, helpHtml }) {
       setLive(true);
       const took = Math.round((performance.now() - t0) / 100) / 10;
       clearInterval(tick);
-      stat(`Terhubung · menunggu gambar… (siap dalam ${took} dtk)`);
+      const breakdown = `siap ${took} dtk (${laps.join(" · ")})`;
+      stat(`Terhubung · menunggu gambar… ${breakdown}`);
       await sleep(1500);
-      if (client === started) stat(`Terhubung · ${canvas.width}×${canvas.height} · siap dalam ${took} dtk`);
+      if (client === started) stat(`Terhubung · ${canvas.width}×${canvas.height} · ${breakdown}`);
     } catch (e) {
       await stopMirror();
       setLive(false);
       resetStage();
-      stat("Gagal memulai.");
+      stat(`Gagal memulai. (${laps.join(" · ") || "tahap awal"})`);
       showErr(e.message || String(e));
     } finally {
       clearInterval(tick);
