@@ -1,4 +1,8 @@
 import "./style.css";
+import { assess } from "./health.js";
+import { addSnap, listSnaps } from "./store.js";
+import { startLive } from "./live.js";
+import { buildReport, cmpTable } from "./report.js";
 import { Adb, adbDaemonAuthenticate } from "@yume-chan/adb";
 import { AdbDaemonWebUsbDeviceManager } from "@yume-chan/adb-daemon-webusb";
 import { AdbWebCryptoCredentialManager, TangoLocalStorage } from "@yume-chan/adb-credential-web";
@@ -15,6 +19,7 @@ let mirrorRunning = false;
 let scrcpyClient = null;
 let scrcpyDecoder = null;
 let currentPage = "dashboard";
+let stopLive = () => {};
 
 // scrcpy-server diunduh saat build ke public/ (lihat scripts/fetch-scrcpy-server.mjs)
 const SCRCPY_SERVER_URL = "/scrcpy-server.bin";
@@ -117,6 +122,8 @@ function needDevice() {
 
 async function go(page) {
   stopMirror();
+  stopLive();
+  stopLive = () => {};
   currentPage = page;
   document.querySelectorAll("#nav button, #bnav button[data-page]").forEach((b) => b.classList.toggle("active", b.dataset.page === page));
   if (!adb) return needDevice();
@@ -229,30 +236,31 @@ const PAGE_RENDER = {
     ]);
     const bat = parseBattery(batRaw);
     const wifiIp = (ip.match(/inet (\d+\.\d+\.\d+\.\d+)/) || [])[1] || "-";
-    const finds = [];
-    if (bat.healthCode > 2) finds.push(["Baterai", `Kesehatan baterai: ${bat.health}`]);
-    if (bat.temp != null && bat.temp >= 42) finds.push(["Suhu baterai", `${bat.temp.toFixed(1)} °C, di atas batas wajar 42 °C`]);
-    if (storage && storage.percent >= 85) finds.push(["Penyimpanan", `${storage.percent}% terpakai`]);
-    if (mem && mem.percentFree < 5) finds.push(["RAM", "Hampir habis"]);
+    const a = assess({ bat, storage, mem, patch });
     const level = Number(bat.level) || 0;
+    const id = serial || device?.serial || "";
+    const snap = (tag) => ({ t: Date.now(), tag, score: a.score, level, temp: bat.temp, storage: storage?.percent ?? null, ram: mem ? Math.round(mem.percentFree) : null });
+    const last = (tag) => [...listSnaps(id)].reverse().find((x) => x.tag === tag);
+    addSnap(id, snap());
     const segs = Array.from({ length: 20 }, (_, i) => `<i style="--i:${i}" class="${i < Math.round(level / 5) ? "on" : ""}"></i>`).join("");
     const meta = (k, v) => `<div><dt>${k}</dt><dd>${esc(v)}</dd></div>`;
     const tiles = PAGES.map(([k, l]) => `<button data-page="${k}" class="${k === "dashboard" ? "active" : ""}">${l}</button>`).join("");
-    const rowsHtml = finds.length
-      ? finds.map(([t, d]) => `<li data-s="warn"><span class="mk"></span><div>${esc(t)}<em>${esc(d)}</em></div><span class="st">Perlu dicek</span></li>`).join("")
+    const rowsHtml = a.reasons.length
+      ? a.reasons.map((r) => `<li data-s="${r.level}"><span class="mk"></span><div>${esc(r.title)}<em>${esc(r.detail)}</em></div><span class="st">${r.level === "bad" ? "Bermasalah" : "Perlu dicek"}</span></li>`).join("")
       : `<li data-s="ok"><span class="mk"></span><div>Tidak ada kerusakan terdeteksi<em>Pemeriksaan lengkap ada di Hardware Test</em></div><span class="st">Baik</span></li>`;
     view.innerHTML = `
       <section class="readout">
         <div>
           <h1>${esc(model || "Perangkat")}</h1>
           <p>${esc(brand)}, Android ${esc(android)} (SDK ${esc(sdk)})</p>
+          <div class="verdict" data-s="${a.level}"><b>${a.score}</b><span>${a.verdict}</span></div>
           <dl class="meta">
             ${meta("RAM", mem ? `${gb(mem.avail)} bebas dari ${gb(mem.total)}` : "-")}
             ${meta("Penyimpanan", storage ? `${gb(storage.used)} dari ${gb(storage.total)}` : "-")}
             ${meta("Suhu baterai", bat.temp != null ? bat.temp.toFixed(1) + " °C" : "-")}
             ${meta("Kesehatan baterai", bat.health)}
             ${meta("Security patch", patch || "-")}
-            ${meta("Serial", serial || device?.serial || "-")}
+            ${meta("Serial", id || "-")}
             ${meta("IP WiFi", wifiIp)}
           </dl>
         </div>
@@ -263,12 +271,46 @@ const PAGE_RENDER = {
         <div><b>1</b><span>Perangkat terhubung</span></div>
         <div><b>Aktif</b><span>ADB</span></div>
         <div><b>${storage ? storage.percent + "%" : "-"}</b><span>Penyimpanan terpakai</span></div>
-        <div><b>${finds.length}</b><span>Temuan</span></div>
+        <div><b>${a.reasons.length}</b><span>Temuan</span></div>
       </div>
       <h2>Kondisi perangkat</h2>
       <ul class="rows">${rowsHtml}</ul>
-      <div class="row"><button id="refresh">Refresh</button></div>`;
+      <h2 class="gap">Pantauan langsung</h2>
+      <div id="live" class="live"></div>
+      <h2>Sebelum dan sesudah servis</h2>
+      <div id="cmp" class="card"></div>
+      <div class="row">
+        <button id="snapBefore">Simpan sebagai Sebelum</button>
+        <button id="snapAfter">Simpan sebagai Sesudah</button>
+        <button id="report" class="primary">Laporan pelanggan</button>
+        <button id="refresh">Refresh</button>
+      </div>`;
+    const drawCmp = () => {
+      const b = last("before"), f = last("after");
+      $("#cmp").innerHTML = b || f ? cmpTable(b, f) : `<p class="muted">Belum ada. Simpan kondisi sebelum servis, lalu sesudahnya untuk dibandingkan. Data tersimpan di browser ini saja.</p>`;
+    };
+    drawCmp();
+    $("#snapBefore").onclick = () => { addSnap(id, snap("before")); drawCmp(); };
+    $("#snapAfter").onclick = () => { addSnap(id, snap("after")); drawCmp(); };
+    $("#report").onclick = () => {
+      let shop = "";
+      try { shop = localStorage.getItem("nexa-shop") ?? ""; } catch {}
+      if (!shop) {
+        shop = prompt("Nama toko untuk laporan (boleh kosong)") || "";
+        try { localStorage.setItem("nexa-shop", shop); } catch {}
+      }
+      const rows = [
+        ["Merek dan model", `${brand} ${model}`], ["Android", `${android} (SDK ${sdk})`],
+        ["Baterai", `${level}%, ${bat.health}`], ["Suhu baterai", bat.temp != null ? bat.temp.toFixed(1) + " °C" : "-"],
+        ["Penyimpanan", storage ? `${gb(storage.used)} dari ${gb(storage.total)} (${storage.percent}%)` : "-"],
+        ["RAM", mem ? `${gb(mem.avail)} bebas dari ${gb(mem.total)}` : "-"],
+        ["Security patch", patch || "-"], ["Serial", id || "-"],
+      ];
+      const html = buildReport({ shop, rows, a, before: last("before"), after: last("after") });
+      window.open(URL.createObjectURL(new Blob([html], { type: "text/html" })), "_blank");
+    };
     $("#refresh").onclick = () => go("dashboard");
+    stopLive = startLive($("#live"), async () => parseBattery(await sh("dumpsys battery")));
   },
 
   async info(view) {
@@ -613,3 +655,4 @@ async function runHardwareTests() {
 // ---------------------------------------------------------------
 needDevice();
 go("dashboard");
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
