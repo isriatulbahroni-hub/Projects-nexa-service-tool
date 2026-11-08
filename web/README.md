@@ -7,7 +7,11 @@ Dokumentasi lengkap (fitur, batasan, rencana) ada di [README di root repo](../RE
 ## Fitur singkat
 
 - Pemeriksaan baca-saja: Dashboard, Info Device, Hardware Test, Security, Aplikasi, File.
+- **Uji manual interaktif** di Hardware Test: getaran, suara, kecerahan layar, tombol fisik (Vol+, Vol−, Power), port USB/pengisian. Hasil dinilai teknisi (Normal / Bermasalah).
 - **Mirror real-time (scrcpy v5.0.1)** dengan kontrol sentuh, tombol Back/Home/Recents, dan screenshot. Fitur ini **mengendalikan HP**.
+  - Server scrcpy diunduh di latar belakang saat halaman dibuka dan tidak dikirim ulang ke HP kalau sudah ada.
+  - Profil kualitas Ringan (720p, bawaan), Normal (1024p), Tajam (1600p).
+  - Tiap tahap punya batas waktu; kalau push lewat sync macet, otomatis memakai jalur cadangan lewat shell.
 - Terminal ADB shell. Ini juga bisa mengubah HP; hati-hati dengan perintahnya.
 - PWA: bisa ditambahkan ke layar utama.
 
