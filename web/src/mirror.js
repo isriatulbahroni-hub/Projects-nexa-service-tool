@@ -1,7 +1,10 @@
 // Screen Mirror (scrcpy) untuk versi web.
 // Dipisah dari main.js supaya alur start bisa dioptimalkan sendiri:
 //  - server scrcpy diunduh di latar belakang saat halaman dibuka (bukan saat tombol Mulai ditekan)
-//  - server dikirim ke HP sebagai SATU aliran data (cat > file), bukan potongan-potongan kecil
+//  - server dikirim ke HP lewat `head -c <ukuran> > file`: proses di HP berhenti sendiri setelah
+//    jumlah byte terpenuhi, jadi tidak perlu menutup stdin (di ADB, menutup stdin = menutup seluruh socket,
+//    yang membuat `cat > file` menggantung atau file terpotong)
+//  - kalau jalur utama gagal/macet, prosesnya DIMATIKAN dulu baru jalur sync (cadangan) dicoba
 //  - server tidak dikirim ulang ke HP kalau file yang sama sudah ada
 //  - tiap tahap punya batas waktu dan dicatat lamanya, supaya yang lambat kelihatan
 //  - profil kualitas Ringan / Normal / Tajam
@@ -103,8 +106,8 @@ async function readAll(stream) {
   return s;
 }
 
-// Kirim sebagai potongan kecil untuk jalur sync (cadangan).
-function chunkedStream(bytes, size = 32 * 1024) {
+// Kirim sebagai potongan 64 KB untuk jalur sync (cadangan).
+function chunkedStream(bytes, size = 64 * 1024) {
   let off = 0;
   return new ReadableStream({
     pull(controller) {
@@ -115,28 +118,43 @@ function chunkedStream(bytes, size = 32 * 1024) {
   });
 }
 
+// Ukuran file di HP: `stat` dulu (paling andal), `ls -l` sebagai cadangan.
 async function remoteSize(sh, path) {
+  const a = (await sh(`stat -c %s ${path} 2>/dev/null`)).trim();
+  if (/^\d+$/.test(a)) return Number(a);
   const out = await sh(`ls -l ${path} 2>/dev/null`);
   const m = out.match(/\s(\d+)\s+\d{4}-\d{2}-\d{2}/);
   return m ? Number(m[1]) : null;
 }
 
-// Jalur utama: satu aliran data ke `cat > file`. Satu perjalanan USB, tanpa protokol sync.
-// (Cara yang sama dipakai tombol Install APK di halaman Perbaikan.)
-async function pushViaStdin(adb, sh, bytes, path) {
+// Jalur utama: `head -c <ukuran> > file`. Proses di HP berhenti sendiri tepat setelah <ukuran> byte,
+// jadi stdin TIDAK ditutup (menutup stdin di ADB menutup seluruh socket dan bisa memotong file).
+// Kalau macet, proses dimatikan supaya tidak menahan file dan koneksi USB untuk jalur berikutnya.
+async function pushViaShell(adb, sh, bytes, path, ms) {
   await sh(`rm -f ${path}`);
-  const proc = await adb.subprocess.noneProtocol.spawn(`cat > ${path}`);
-  const outP = readAll(proc.output).catch(() => "");
-  const writer = proc.stdin.getWriter();
-  const STEP = 32 * 1024;
-  for (let off = 0; off < bytes.length; off += STEP) {
-    await writer.write(bytes.subarray(off, off + STEP));
+  const proc = await adb.subprocess.noneProtocol.spawn(`head -c ${bytes.length} > ${path}`);
+  const finished = readAll(proc.output).catch(() => "");
+  const work = (async () => {
+    const writer = proc.stdin.getWriter();
+    try {
+      await writer.write(bytes);
+    } finally {
+      try { writer.releaseLock(); } catch {}
+    }
+    await finished; // socket ditutup HP setelah `head` selesai
+  })();
+  work.catch(() => {}); // cegah unhandled rejection kalau timeout lebih dulu
+  try {
+    await withTimeout(work, ms, "Pengiriman ke HP macet.");
+  } catch (e) {
+    try { await proc.kill(); } catch {}
+    throw e;
   }
-  await writer.close();
-  await outP;
   await sh(`chmod 644 ${path}`);
   const size = await remoteSize(sh, path);
-  if (size !== bytes.length) throw new Error("Ukuran file di HP tidak cocok setelah dikirim.");
+  if (size !== bytes.length) {
+    throw new Error(`Ukuran file di HP tidak cocok (${size ?? "tidak ada"} dari ${bytes.length}).`);
+  }
 }
 
 // ---------------------------------------------------------------
@@ -254,12 +272,16 @@ export function renderMirror(view, { sh, getAdb, helpHtml }) {
 
       // 1) unduh server, bersihkan sisa sesi lama, dan cek file di HP: semuanya paralel
       setStep("Menyiapkan server scrcpy");
-      const [server, , existing] = await Promise.all([
-        prefetchServer(),
-        // sisa server dari sesi sebelumnya (mis. setelah refresh) bisa menahan koneksi
-        sh('pkill -f "[c]om.genymobile.scrcpy.Server"'),
-        remoteSize(sh, DefaultServerPath),
-      ]);
+      const [server, , existing] = await withTimeout(
+        Promise.all([
+          prefetchServer(),
+          // sisa server dari sesi sebelumnya (mis. setelah refresh) bisa menahan koneksi
+          sh('pkill -f "[c]om.genymobile.scrcpy.Server"'),
+          remoteSize(sh, DefaultServerPath),
+        ]),
+        20000,
+        "Gagal menyiapkan server scrcpy (unduhan atau HP tidak merespons). Cek koneksi internet dan kabel USB.",
+      );
       lap("siapkan");
       if (!alive()) return;
 
@@ -270,16 +292,19 @@ export function renderMirror(view, { sh, getAdb, helpHtml }) {
       } else {
         setStep("Mengirim server ke HP");
         try {
-          await withTimeout(pushViaStdin(adb, sh, server, DefaultServerPath), 15000, "Pengiriman utama macet.");
+          await pushViaShell(adb, sh, server, DefaultServerPath, 8000);
+          lap("kirim");
         } catch (e) {
-          setStep("Jalur utama gagal, mencoba jalur sync");
+          const why = e?.message || String(e);
+          setStep(`Jalur utama gagal (${why}), mencoba jalur sync`);
+          lap("kirim-utama-gagal");
           await withTimeout(
             AdbScrcpyClient.pushServer(adb, chunkedStream(server), DefaultServerPath),
-            15000,
-            "Server tidak bisa dikirim ke HP. Cabut dan colok kabel USB, lalu coba lagi.",
+            20000,
+            `Server tidak bisa dikirim ke HP (jalur utama: ${why}). Cabut dan colok kabel USB, lalu coba lagi.`,
           );
+          lap("kirim (sync)");
         }
-        lap("kirim");
       }
       if (!alive()) return;
 
@@ -366,6 +391,9 @@ export function renderMirror(view, { sh, getAdb, helpHtml }) {
           buttons: action === ACTION.Up ? 0 : 1,
         }).catch(() => {});
       };
+      // gerakan sentuh digabung per frame layar (maks 1 kiriman per frame) supaya USB tidak kebanjiran
+      let pendingMove = null;
+      let moveRaf = 0;
       canvas.addEventListener("pointerdown", (e) => {
         e.preventDefault();
         canvas.focus();
@@ -373,8 +401,24 @@ export function renderMirror(view, { sh, getAdb, helpHtml }) {
         canvas.setPointerCapture(e.pointerId);
         touch(ACTION.Down, e);
       });
-      canvas.addEventListener("pointermove", (e) => { if (pressed) touch(ACTION.Move, e); });
-      const release = (e) => { if (pressed) { pressed = false; touch(ACTION.Up, e); } };
+      canvas.addEventListener("pointermove", (e) => {
+        if (!pressed) return;
+        pendingMove = e;
+        if (!moveRaf) {
+          moveRaf = requestAnimationFrame(() => {
+            moveRaf = 0;
+            const ev = pendingMove;
+            pendingMove = null;
+            if (ev && pressed) touch(ACTION.Move, ev);
+          });
+        }
+      });
+      const release = (e) => {
+        if (!pressed) return;
+        pressed = false;
+        pendingMove = null;
+        touch(ACTION.Up, e);
+      };
       canvas.addEventListener("pointerup", release);
       canvas.addEventListener("pointercancel", release);
 
