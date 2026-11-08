@@ -3,6 +3,7 @@ import { assess } from "./health.js";
 import { addSnap, listSnaps } from "./store.js";
 import { startLive } from "./live.js";
 import { buildReport, cmpTable } from "./report.js";
+import { renderTriase } from "./triase.js";
 import { Adb, adbDaemonAuthenticate } from "@yume-chan/adb";
 import { AdbDaemonWebUsbDeviceManager } from "@yume-chan/adb-daemon-webusb";
 import { AdbWebCryptoCredentialManager, TangoLocalStorage } from "@yume-chan/adb-credential-web";
@@ -37,6 +38,7 @@ const PAGES = [
   ["files", "File"],
   ["mirror", "Mirror"],
   ["terminal", "Terminal & Log"],
+  ["triase", "Triase HP"],
 ];
 
 async function sh(cmd) {
@@ -117,6 +119,7 @@ function needDevice() {
       <p>Colokkan HP lewat kabel USB, aktifkan <b>USB debugging</b>, lalu tekan <b>Hubungkan HP (USB)</b> dan pilih perangkatnya.</p>
       <p class="muted">Syarat: browser Chrome/Edge (desktop) atau Chrome Android dengan kabel OTG, halaman HTTPS.
       Kalau gagal "Access denied": di komputer jalankan <code>adb kill-server</code> (ADB server bawaan merebut koneksi USB) dan tutup aplikasi lain yang memakai ADB.</p>
+      <p>HP tidak bisa menyala atau terkunci? <button data-page="triase">Buka Triase HP</button></p>
     </div>`;
 }
 
@@ -126,7 +129,7 @@ async function go(page) {
   stopLive = () => {};
   currentPage = page;
   document.querySelectorAll("#nav button, #bnav button[data-page]").forEach((b) => b.classList.toggle("active", b.dataset.page === page));
-  if (!adb) return needDevice();
+  if (!adb && page !== "triase") return needDevice();
   const view = $("#view");
   view.innerHTML = `<p class="muted">Memuat…</p>`;
   try {
@@ -311,6 +314,10 @@ const PAGE_RENDER = {
     };
     $("#refresh").onclick = () => go("dashboard");
     stopLive = startLive($("#live"), async () => parseBattery(await sh("dumpsys battery")));
+  },
+
+  triase(view) {
+    renderTriase(view, { go });
   },
 
   async info(view) {
