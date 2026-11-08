@@ -6,6 +6,10 @@ tests or tools/) without side effects like launching a QApplication.
 from app import QApplication, MainWindow, configure_logging, logger
 import sys
 
+from ui.mirror_integration import install_realtime_mirror
+
+install_realtime_mirror(MainWindow)
+
 
 def main() -> int:
     configure_logging()
