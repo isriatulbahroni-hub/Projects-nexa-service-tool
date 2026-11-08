@@ -61,6 +61,14 @@ export async function renderRepair(view, ctx) {
     </div>
 
     <div class="card">
+      <h2>Cek kompatibilitas HP ini</h2>
+      <p class="muted">Memeriksa apakah perintah yang dipakai halaman ini tersedia di HP yang terhubung. Tidak menjalankan aksi dan tidak mengubah HP.
+      Hasilnya hanya menunjukkan perintah tersedia; hasil aksi sebenarnya tetap tampil di log setelah dijalankan.</p>
+      <div class="row"><button id="compat" class="primary">Cek sekarang</button></div>
+      <div id="compatres"></div>
+    </div>
+
+    <div class="card">
       <h2>1. Aplikasi</h2>
       <div class="row"><input id="pkg" list="pkgs" placeholder="nama paket, mis. com.whatsapp" /><datalist id="pkgs"></datalist></div>
       <div class="row">
@@ -153,7 +161,7 @@ export async function renderRepair(view, ctx) {
     const m = raw.match(/EXIT:(\d+)\s*$/);
     const code = m ? Number(m[1]) : null;
     const out = raw.replace(/EXIT:\d+\s*$/, "").trim();
-    const failed = /^(Failure|Error|Exception|Unknown command|cmd: Can't find service|.*not found)/im.test(out);
+    const failed = /^(Failure|Error|Exception|Unknown command|cmd: Can't find service)|: not found\s*$/im.test(out);
     return { ok: code === 0 && !failed, code, out };
   }
 
@@ -181,6 +189,46 @@ export async function renderRepair(view, ctx) {
   };
 
   const anim = (v) => `settings put global window_animation_scale ${v}; settings put global transition_animation_scale ${v}; settings put global animator_duration_scale ${v}`;
+
+  // --- cek kompatibilitas (tidak mengubah HP) ----------------------------
+  q("#compat").onclick = async () => {
+    const box = q("#compatres");
+    const btn = q("#compat");
+    btn.disabled = true;
+    box.innerHTML = `<p class="muted">Memeriksa…</p>`;
+    try {
+      const sdk = Number(await sh("getprop ro.build.version.sdk")) || 0;
+      const bins = ["pm", "cmd", "am", "svc", "sm", "settings", "dumpsys", "tar", "find", "du", "cat", "rm", "reboot"];
+      const probe = await sh(bins.map((b) => `command -v ${b} >/dev/null 2>&1 && echo OK:${b} || echo NO:${b}`).join("; "));
+      const has = new Set(probe.split("\n").map((l) => l.trim()).filter((l) => l.startsWith("OK:")).map((l) => l.slice(3)));
+      const svcList = await sh("cmd -l 2>/dev/null");
+      const hasSvc = (n) => new RegExp(`^\\s*${n}\\s*$`, "m").test(svcList);
+      const store = await sh("find /storage/emulated/0 -maxdepth 1 2>/dev/null | head -n 3");
+      const need = (...b) => b.every((x) => has.has(x));
+      const rows = [
+        ["Aplikasi: hentikan, hapus data, nonaktifkan, copot", need("pm", "am") && sdk >= 21, "pm, am, Android 5+"],
+        ["Install APK", need("cmd") && sdk >= 24, "cmd package install -S (Android 7+)"],
+        ["Reboot", need("reboot"), "reboot"],
+        ["Bersihkan cache", need("pm"), "pm trim-caches"],
+        ["Cari file besar dan hapus", need("find", "rm") && !!store, store ? "find, akses /storage/emulated/0 OK" : "penyimpanan tidak terbaca (HP terkunci atau tanpa izin)"],
+        ["Backup folder dan unduh file", need("tar", "du", "cat") && !!store, "tar, du, cat"],
+        ["Optimasi aplikasi", need("cmd") && sdk >= 26, "cmd package bg-dexopt-job (Android 8+)"],
+        ["Maintenance penyimpanan", need("sm"), "sm idle-maint"],
+        ["Animasi sistem", need("settings"), "settings"],
+        ["Wi-Fi dan data seluler", need("svc"), "svc"],
+        ["Mode pesawat", need("cmd") && hasSvc("connectivity") && sdk >= 30, "cmd connectivity (Android 11+)"],
+        ["Baterai", need("dumpsys"), "dumpsys"],
+        ["Reset pabrik terpandu", need("reboot", "dumpsys"), "reboot recovery"],
+      ];
+      box.innerHTML = `<p class="muted">Android SDK ${sdk || "?"}</p><table>${rows.map(([name, ok, note]) =>
+        `<tr><td>${esc(name)}</td><td class="${ok ? "pass" : "fail"}">${ok ? "Tersedia" : "Tidak tersedia"}</td><td class="muted">${esc(note)}</td></tr>`).join("")}</table>`;
+      addLog("Cek kompatibilitas", true, rows.filter((r) => !r[1]).map((r) => `Tidak tersedia: ${r[0]}`).join("\n") || "Semua perintah tersedia.");
+    } catch (e) {
+      box.innerHTML = `<pre class="fail">${esc(e.message || e)}</pre>`;
+    } finally {
+      btn.disabled = false;
+    }
+  };
 
   // --- registri aksi -----------------------------------------------------
   const ACTIONS = {
@@ -304,8 +352,17 @@ export async function renderRepair(view, ctx) {
         sent += value.length;
         stat(`Mengirim… ${Math.round((sent / file.size) * 100)}%`);
       }
-      writer.releaseLock();
-      const out = (await outP).trim();
+      stat("Menunggu hasil dari HP…");
+      // pm install -S berhenti membaca setelah <ukuran> byte; kalau HP tidak merespons dalam 20 detik,
+      // tutup stdin (cara yang dipakai Tango) lalu tunggu hasilnya.
+      let out = await Promise.race([outP, new Promise((r) => setTimeout(() => r(null), 20000))]);
+      if (out === null) {
+        try { await writer.close(); } catch {}
+        out = await outP;
+      } else {
+        writer.releaseLock();
+      }
+      out = out.trim();
       const ok = /Success/i.test(out);
       stat(ok ? "Terpasang." : "Gagal.");
       addLog(`Install APK ${file.name}`, ok, out);
@@ -322,8 +379,13 @@ export async function renderRepair(view, ctx) {
     const adb = getAdb();
     let writer = null;
     if (window.showSaveFilePicker) {
-      const handle = await window.showSaveFilePicker({ suggestedName: filename });
-      writer = await handle.createWritable();
+      try {
+        const handle = await window.showSaveFilePicker({ suggestedName: filename });
+        writer = await handle.createWritable();
+      } catch (e) {
+        if (e?.name === "AbortError") throw new Error("Dibatalkan.");
+        writer = null; // izin klik sudah habis atau tidak didukung: pakai unduhan biasa
+      }
     }
     const proc = await adb.subprocess.noneProtocol.spawn(cmd);
     const reader = proc.output.getReader();
@@ -388,7 +450,8 @@ export async function renderRepair(view, ctx) {
   q("#scan").onclick = async () => {
     const box = q("#large");
     box.innerHTML = `<p class="muted">Mencari… (bisa agak lama)</p>`;
-    const out = await sh("find /sdcard -type f -size +20M -exec ls -l {} + 2>/dev/null");
+    // /sdcard adalah symlink; find tidak mengikutinya, jadi pakai path aslinya.
+    const out = await sh("find /storage/emulated/0 -type f -size +20M -exec ls -l {} + 2>/dev/null");
     const rows = out.split("\n").map((l) => {
       const p = l.trim().split(/\s+/);
       if (p.length < 8 || !p[0].startsWith("-")) return null;
