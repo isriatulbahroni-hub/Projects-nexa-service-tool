@@ -10,6 +10,14 @@ import { AdbWebCryptoCredentialManager, TangoLocalStorage } from "@yume-chan/adb
 import { AdbScrcpyClient, AdbScrcpyOptions5_0_1 } from "@yume-chan/adb-scrcpy";
 import { DefaultServerPath } from "@yume-chan/scrcpy";
 import { BitmapVideoFrameRenderer, WebCodecsVideoDecoder } from "@yume-chan/scrcpy-decoder-webcodecs";
+import { renderRepair } from "./repair.js";
+
+// PWA: daftarkan service worker hanya di build produksi
+if ("serviceWorker" in navigator && import.meta.env.PROD) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => {});
+  });
+}
 
 // ---------------------------------------------------------------
 // State & helpers
@@ -22,8 +30,25 @@ let scrcpyDecoder = null;
 let currentPage = "dashboard";
 let stopLive = () => {};
 
+const ADB_KEY_STORAGE = "nexa-service-web-adb-key";
+
 // scrcpy-server diunduh saat build ke public/ (lihat scripts/fetch-scrcpy-server.mjs)
 const SCRCPY_SERVER_URL = "/scrcpy-server.bin";
+
+const MIRROR_HELP = `
+  <details class="help" style="margin-top:12px">
+    <summary><b>Layar HP tidak bisa disentuh / HP tidak terdeteksi?</b></summary>
+    <p><b>HP menyala tapi layar tidak bisa disentuh (USB debugging belum aktif):</b></p>
+    <ol>
+      <li>Colok <b>mouse USB</b> ke HP pelanggan lewat adaptor OTG. Akan muncul kursor di layar.</li>
+      <li>Buka Pengaturan, Tentang ponsel, ketuk <b>Build number</b> 7 kali, lalu Opsi pengembang dan aktifkan <b>USB debugging</b>.</li>
+      <li>Cabut mouse, colok kabel dari HP ini ke HP pelanggan, tekan <b>Hubungkan HP (USB)</b>.</li>
+      <li>Di HP pelanggan, ketuk <b>Izinkan</b> pada dialog debugging (pakai mouse), lalu tekan <b>Mulai</b> di sini.</li>
+    </ol>
+    <p><b>Layar mati total atau pecah:</b> kalau USB debugging sudah pernah diizinkan, mirror tetap bisa menampilkan layarnya. Kalau belum, ADB tidak bisa jalan; coba layar eksternal lewat USB-C ke HDMI (hanya HP yang mendukung) sambil memakai mouse.</p>
+    <p><b>HP tidak bisa menyala:</b> alat ini tidak bisa membantu karena ADB butuh Android yang sudah berjalan. Cek charger, kabel, baterai, dan kerusakan hardware.</p>
+    <p><b>HP terkunci:</b> minta pemilik membukanya sendiri. Alat ini tidak membuka kunci layar atau akun.</p>
+  </details>`;
 
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) =>
@@ -36,6 +61,7 @@ const PAGES = [
   ["security", "Security"],
   ["apps", "Aplikasi"],
   ["files", "File"],
+  ["repair", "Perbaikan"],
   ["mirror", "Mirror"],
   ["terminal", "Terminal & Log"],
   ["triase", "Triase HP"],
@@ -74,7 +100,7 @@ async function stopMirror() {
 $("#app").innerHTML = `
   <div class="app">
     <aside>
-      <div class="brand">Nexa Service Tool<small>Versi web, baca-saja</small></div>
+      <div class="brand">Nexa Service Tool<small>Versi web</small></div>
       <nav id="nav"></nav>
     </aside>
     <div class="col">
@@ -120,7 +146,17 @@ function needDevice() {
       <p class="muted">Syarat: browser Chrome/Edge (desktop) atau Chrome Android dengan kabel OTG, halaman HTTPS.
       Kalau gagal "Access denied": di komputer jalankan <code>adb kill-server</code> (ADB server bawaan merebut koneksi USB) dan tutup aplikasi lain yang memakai ADB.</p>
       <p>HP tidak bisa menyala atau terkunci? <button data-page="triase">Buka Triase HP</button></p>
+      <div class="row"><button id="forgetKey">Hapus kunci ADB browser ini</button></div>
+      <p class="muted">Kunci ADB tersimpan di browser ini supaya HP tidak minta izin berulang. Hapus kalau perangkat ini dipinjamkan atau dipakai bersama.</p>
     </div>`;
+  const fk = $("#forgetKey");
+  if (fk) {
+    fk.onclick = () => {
+      if (!confirm("Hapus kunci ADB di browser ini? Semua HP akan meminta izin USB debugging lagi saat dihubungkan.")) return;
+      try { localStorage.removeItem(ADB_KEY_STORAGE); } catch {}
+      alert("Kunci ADB dihapus.");
+    };
+  }
 }
 
 async function go(page) {
@@ -159,7 +195,7 @@ async function connect() {
       serial: device.serial,
       connection,
       credentialManager: new AdbWebCryptoCredentialManager(
-        new TangoLocalStorage("nexa-service-web-adb-key"),
+        new TangoLocalStorage(ADB_KEY_STORAGE),
         "Nexa Service Tool Web",
       ),
     });
@@ -191,7 +227,7 @@ async function disconnect() {
 }
 
 // ---------------------------------------------------------------
-// Data collectors (semua READ-ONLY)
+// Data collectors (pembacaan saja)
 // ---------------------------------------------------------------
 const BATTERY_HEALTH = { 1: "Unknown", 2: "Good", 3: "Overheat", 4: "Dead", 5: "Over voltage", 6: "Unspecified failure", 7: "Cold" };
 
@@ -359,12 +395,12 @@ const PAGE_RENDER = {
       ["SELinux", selinux || "-", selinux === "Enforcing" ? "PASS" : selinux ? "WARN" : "INFO"],
       ["Security patch", patch ? `${patch} (${age} hari lalu)` : "-", age == null ? "INFO" : age > 365 ? "WARN" : "PASS"],
       ["Build debuggable", debuggable || "-", debuggable === "1" ? "WARN" : "PASS"],
-      ["Root (su)", su ? "Ditemukan" : "Tidak ditemukan", su ? "WARN" : "PASS"],
+      ["Root (file su)", su ? "Ditemukan" : "Tidak ditemukan (Magisk bisa lolos)", su ? "WARN" : "INFO"],
       ["Setup wizard selesai", setup || "-", "INFO"],
       ["Device provisioned", prov || "-", "INFO"],
       ["Build tags", build || "-", "INFO"],
     ];
-    view.innerHTML = `<div class="card"><h2>Security Check (baca saja)</h2><table>
+    view.innerHTML = `<div class="card"><h2>Security Check</h2><table>
       ${rows.map(([k, v, s]) => `<tr><td>${k}</td><td class="${statusClass(s)}">${s}</td><td>${esc(v)}</td></tr>`).join("")}
     </table></div>`;
   },
@@ -380,6 +416,7 @@ const PAGE_RENDER = {
           <button id="tSys">Sistem (${s.length})</button>
         </div>
         <div class="row"><input id="q" placeholder="Cari paket…" /></div>
+        <p class="muted">Untuk menghentikan, menonaktifkan, mencopot, atau memasang aplikasi, pakai halaman <b>Perbaikan</b>.</p>
         <table id="tbl"></table>
         <pre id="detail" style="display:none;margin-top:10px"></pre></div>`;
     let list = u;
@@ -416,12 +453,17 @@ const PAGE_RENDER = {
     const parent = path.replace(/\/[^/]+\/?$/, "") || "/";
     view.innerHTML = `
       <div class="card"><h2>${esc(path)}</h2>
+        <p class="muted">Untuk backup folder atau mengunduh file besar, pakai halaman <b>Perbaikan</b>, bagian Penyimpanan.</p>
         <div class="row"><button id="up">⬆ Naik</button></div>
         <table>${entries.map((e) => `<tr><td>${e.dir ? "📁" : "📄"} ${e.dir ? `<span class="link" data-dir="${esc(e.name)}">${esc(e.name)}</span>` : esc(e.name)}</td><td class="muted">${e.dir ? "" : esc(e.size)}</td><td class="muted">${esc(e.date)}</td></tr>`).join("") || `<tr><td class="muted">(kosong / tidak ada izin)</td></tr>`}</table></div>`;
     $("#up").onclick = () => PAGE_RENDER.files(view, parent);
     view.querySelectorAll("[data-dir]").forEach((el) => {
       el.onclick = () => PAGE_RENDER.files(view, path.replace(/\/$/, "") + "/" + el.dataset.dir);
     });
+  },
+
+  async repair(view) {
+    await renderRepair(view, { sh, getAdb: () => adb, esc });
   },
 
   async mirror(view) {
@@ -438,7 +480,8 @@ const PAGE_RENDER = {
           <button data-k="3">⚪ Home</button>
           <button data-k="187">▢ Recents</button>
           <button id="shot">📷 Screenshot</button>
-        </div></div>`;
+        </div>
+        ${MIRROR_HELP}</div>`;
 
     const stat = (t) => { const el = $("#mstat"); if (el) el.textContent = t; };
     const ACTION = { Down: 0, Up: 1, Move: 2 };
@@ -575,6 +618,7 @@ const PAGE_RENDER = {
   async terminal(view) {
     view.innerHTML = `
       <div class="card"><h2>Terminal ADB shell</h2>
+        <p class="muted">Perintah di sini bisa mengubah HP. Konfirmasi hanya muncul untuk kata kunci tertentu, jadi periksa perintahmu sendiri.</p>
         <div class="row"><input id="cmd" placeholder="mis. getprop ro.product.model" /><button id="exec" class="primary">Jalankan</button></div>
         <div class="row">
           <button data-c="logcat -d -t 300">Logcat 300 baris</button>
@@ -584,7 +628,7 @@ const PAGE_RENDER = {
           <button data-c="df -h">Storage</button>
         </div>
         <pre id="out">(hasil muncul di sini)</pre></div>`;
-    const DANGER = /(\brm\b|\bwipe\b|\bformat\b|\bdd\b|\breboot\b|\bflash|\bmkfs|\bsetprop\b|\bpm (clear|uninstall)|\bsettings put)/;
+    const DANGER = /(\brm\b|\bwipe\b|\bformat\b|\bdd\b|\breboot\b|\bflash|\bmkfs|\bsetprop\b|\bpm (clear|uninstall|disable|disable-user|enable)\b|\bam force-stop\b|\bsvc\b|\bcmd package\b|\bsettings put\b)/;
     const run = async (c) => {
       if (!c.trim()) return;
       if (DANGER.test(c) && !confirm(`Perintah ini bisa mengubah/menghapus data di HP:\n\n${c}\n\nLanjutkan?`)) return;
@@ -598,7 +642,7 @@ const PAGE_RENDER = {
 };
 
 // ---------------------------------------------------------------
-// Hardware tests (read-only; logika ditiru dari core/hardware_test.py)
+// Hardware tests (pembacaan saja; logika ditiru dari core/hardware_test.py)
 // ---------------------------------------------------------------
 async function runHardwareTests() {
   const tbl = $("#res");
@@ -646,7 +690,7 @@ async function runHardwareTests() {
     ["Accelerometer", "android.hardware.sensor.accelerometer"], ["Gyroscope", "android.hardware.sensor.gyroscope"],
     ["Proximity", "android.hardware.sensor.proximity"], ["Light sensor", "android.hardware.sensor.light"],
   ]) {
-    add(name, hasFeature(feat) ? "PASS" : "INFO", hasFeature(feat) ? "Terdeteksi" : "Tidak ada", "Berdasarkan pm list features.");
+    add(name, "INFO", hasFeature(feat) ? "Ada di spesifikasi" : "Tidak tercantum", "HP mengaku punya komponen ini; belum tentu berfungsi.");
   }
 
   const sim = await prop("gsm.sim.state");
@@ -662,4 +706,3 @@ async function runHardwareTests() {
 // ---------------------------------------------------------------
 needDevice();
 go("dashboard");
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
