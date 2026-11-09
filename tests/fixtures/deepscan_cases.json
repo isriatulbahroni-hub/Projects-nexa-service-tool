@@ -1,0 +1,77 @@
+[
+  {
+    "name": "sehat",
+    "facts": {
+      "battery": {"present": true, "health_code": 2, "status_code": 3, "level": 80, "temp_c": 30.0, "voltage_mv": 4000, "ac": false, "usb": false, "wireless": false, "cycle_count": 120, "charge_full": 4900000, "charge_full_design": 5000000},
+      "usb_connected": false,
+      "storage": {"life": 1, "write_latency_ms": 12, "free_percent": 40},
+      "boot": {"history_count": 6, "abnormal": 0, "power": 0, "kernel": 0, "dropbox": {}},
+      "thermal": {"max_c": 38, "status": 0},
+      "input": {"touch_found": true},
+      "modem": {"sim_state": "READY", "baseband": "MOLY.NR15", "radio_unavailable": 0},
+      "sensors": {"read": true, "accelerometer": true, "proximity": true, "light": true, "gyroscope": true},
+      "camera": {"count": 2, "claimed": true},
+      "software": {"crashes": 2, "anrs": 0, "core_crashes": 0},
+      "unreadable": [], "probe_count": 17
+    },
+    "expect": {"codes": [], "top": null, "level": null, "score": 100}
+  },
+  {
+    "name": "baterai aus",
+    "facts": {
+      "battery": {"present": true, "health_code": 2, "status_code": 3, "level": 60, "temp_c": 31.0, "voltage_mv": 3900, "ac": false, "usb": false, "wireless": false, "cycle_count": 1100, "charge_full": 2500000, "charge_full_design": 5000000}
+    },
+    "expect": {"codes": ["BAT_CYCLE", "BAT_WEAR"], "top": "Baterai", "level": "Tinggi", "score": 68}
+  },
+  {
+    "name": "port charge tidak mengisi",
+    "facts": {
+      "battery": {"present": true, "health_code": 2, "status_code": 3, "level": 50, "temp_c": 30.0, "voltage_mv": 3800, "ac": false, "usb": false, "wireless": false},
+      "usb_connected": true
+    },
+    "expect": {"codes": ["CHG_NONE"], "top": "Port charge / IC pengisian", "level": "Sedang", "score": 85}
+  },
+  {
+    "name": "restart sendiri",
+    "facts": {
+      "boot": {"history_count": 9, "abnormal": 5, "power": 3, "kernel": 2, "dropbox": {"system_last_kmsg": 1}}
+    },
+    "expect": {"codes": ["BOOT_MANY", "BOOT_PANIC", "BOOT_POWER", "BOOT_POWER_B"], "top": "Mainboard / catu daya", "level": "Tinggi", "score": 47}
+  },
+  {
+    "name": "storage sekarat",
+    "facts": {
+      "storage": {"life": 10, "write_latency_ms": 600, "free_percent": 30}
+    },
+    "expect": {"codes": ["STO_LIFE", "STO_SLOW"], "top": "Penyimpanan (eMMC/UFS)", "level": "Tinggi", "score": 65}
+  },
+  {
+    "name": "modem hilang",
+    "facts": {
+      "modem": {"sim_state": "READY", "baseband": "", "radio_unavailable": 0}
+    },
+    "expect": {"codes": ["MODEM_BASEBAND"], "top": "Modem / sinyal", "level": "Sedang", "score": 83}
+  },
+  {
+    "name": "touch ada zona mati",
+    "facts": {
+      "input": {"touch_found": true},
+      "touch_test": {"coverage": 0.85, "uncovered": [[0, 0], [1, 0], [0, 1], [1, 1], [5, 9]]}
+    },
+    "expect": {"codes": ["TOUCH_DEAD"], "top": "Layar / touch panel", "level": "Sedang", "score": 83}
+  },
+  {
+    "name": "sapuan sentuh kurang",
+    "facts": {
+      "touch_test": {"coverage": 0.4, "uncovered": [[0, 0]]}
+    },
+    "expect": {"codes": [], "top": null, "level": null, "score": 100}
+  },
+  {
+    "name": "SIM tidak ada bukan kerusakan",
+    "facts": {
+      "modem": {"sim_state": "ABSENT", "baseband": "", "radio_unavailable": 0}
+    },
+    "expect": {"codes": [], "top": null, "level": null, "score": 100}
+  }
+]

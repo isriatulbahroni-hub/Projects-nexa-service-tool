@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTextBrowser,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -66,6 +67,8 @@ from core.device_diagnostics import run_device_diagnostics
 from core.logcat import LogcatStreamer
 from core.report import generate_service_report
 from core.packages import (
+    disable_app,
+    enable_app,
     list_packages,
     install_apk,
     uninstall_package,
@@ -159,6 +162,16 @@ from core.frp_service import (
 )
 from core.factory_reset_ui import FactoryResetAssistantPanel
 from ui.smart_diagnosis_page import SmartDiagnosisPage
+from ui.realtime_mirror_page import RealtimeMirrorPanel
+from core.advanced_diagnosis import (
+    analyze as deepscan_analyze,
+    collect_facts as deepscan_collect,
+    is_usb_serial,
+    parse_input_devices,
+    pick_touchscreen,
+    render_html as deepscan_html,
+    run_touch_test,
+)
 
 logger = get_logger("app")
 
@@ -626,6 +639,7 @@ class MainWindow(QMainWindow):
             ("apps", "App Manager"),
             ("files", "File Explorer"),
             ("mirror", "Screen Mirror"),
+            ("realtime", "Mirror Real-time"),
             ("backup", "Backup & Restore"),
             ("network", "Network & IMEI"),
             ("logs", "Live Logs"),
@@ -633,6 +647,7 @@ class MainWindow(QMainWindow):
             ("firmware", "Firmware & Flash"),
             ("hardware", "Hardware Test"),
             ("smart", "Smart Diagnosis"),
+            ("deepscan", "Deep Scan"),
             ("cases", "Service Cases"),
             ("reports", "Laporan Bisnis"),
             ("parts", "Stok Sparepart"),
@@ -668,6 +683,7 @@ class MainWindow(QMainWindow):
         self.apps_page = self.create_apps_page()
         self.files_page = self.create_files_page()
         self.mirror_page = self.create_mirror_page()
+        self.realtime_page = self.create_realtime_mirror_page()
         self.backup_page = self.create_backup_page()
         self.network_page = self.create_network_page()
         self.logs_page = self.create_logs_page()
@@ -675,6 +691,7 @@ class MainWindow(QMainWindow):
         self.firmware_page = self.create_firmware_page()
         self.hardware_page = self.create_hardware_test_page()
         self.smart_page = self.create_smart_diagnosis_page()
+        self.deepscan_page = self.create_deepscan_page()
         self.cases_page = self.create_service_cases_page()
         self.reports_page = self.create_reports_page()
         self.parts_page = self.create_parts_page()
@@ -690,6 +707,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.apps_page)
         self.pages.addWidget(self.files_page)
         self.pages.addWidget(self.mirror_page)
+        self.pages.addWidget(self.realtime_page)
         self.pages.addWidget(self.backup_page)
         self.pages.addWidget(self.network_page)
         self.pages.addWidget(self.logs_page)
@@ -697,6 +715,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.firmware_page)
         self.pages.addWidget(self.hardware_page)
         self.pages.addWidget(self.smart_page)
+        self.pages.addWidget(self.deepscan_page)
         self.pages.addWidget(self.cases_page)
         self.pages.addWidget(self.reports_page)
         self.pages.addWidget(self.parts_page)
@@ -713,6 +732,7 @@ class MainWindow(QMainWindow):
             "apps": self.apps_page,
             "files": self.files_page,
             "mirror": self.mirror_page,
+            "realtime": self.realtime_page,
             "backup": self.backup_page,
             "network": self.network_page,
             "logs": self.logs_page,
@@ -720,6 +740,7 @@ class MainWindow(QMainWindow):
             "firmware": self.firmware_page,
             "hardware": self.hardware_page,
             "smart": self.smart_page,
+            "deepscan": self.deepscan_page,
             "cases": self.cases_page,
             "reports": self.reports_page,
             "parts": self.parts_page,
@@ -882,6 +903,9 @@ class MainWindow(QMainWindow):
 
         if key != "mirror" and self.screen_mirror and self.screen_mirror.is_running():
             self.stop_mirror()
+
+        if key != "realtime" and getattr(self, "realtime_panel", None) is not None:
+            self.realtime_panel.stop_mirror()
 
         self.pages.setCurrentWidget(self.page_widgets[key])
 
@@ -2342,7 +2366,18 @@ class MainWindow(QMainWindow):
         self.apps_uninstall_button.setObjectName("actionDanger")
         self.apps_uninstall_button.clicked.connect(self.uninstall_selected_app)
 
+        self.apps_disable_button = QPushButton("⏸ Nonaktifkan")
+        self.apps_disable_button.setObjectName("action")
+        self.apps_disable_button.setToolTip("Menyembunyikan dan menghentikan aplikasi. Bisa diaktifkan lagi.")
+        self.apps_disable_button.clicked.connect(self.disable_selected_app)
+
+        self.apps_enable_button = QPushButton("▶ Aktifkan")
+        self.apps_enable_button.setObjectName("action")
+        self.apps_enable_button.clicked.connect(self.enable_selected_app)
+
         action_row.addWidget(self.apps_stop_button)
+        action_row.addWidget(self.apps_disable_button)
+        action_row.addWidget(self.apps_enable_button)
         action_row.addWidget(self.apps_repair_button)
         action_row.addWidget(self.apps_clear_button)
         action_row.addWidget(self.apps_uninstall_button)
@@ -2485,6 +2520,42 @@ class MainWindow(QMainWindow):
         worker.failed.connect(_fail)
         self._apps_action_worker = worker
         worker.start()
+
+    def disable_selected_app(self):
+        package = self._get_selected_package()
+        if not package:
+            QMessageBox.warning(self, "Pilih aplikasi", "Pilih aplikasi dari daftar dulu.")
+            return
+        reply = QMessageBox.question(
+            self, "Konfirmasi Nonaktifkan",
+            f"Nonaktifkan {package}?\n\nAplikasi disembunyikan dan tidak berjalan. "
+            "Bisa diaktifkan lagi lewat tombol Aktifkan.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        serial = self.current_device.serial
+        try:
+            disable_app(serial, package)
+        except ADBError as exc:
+            QMessageBox.critical(self, "Gagal", str(exc))
+            return
+        QMessageBox.information(self, "Berhasil", f"{package} dinonaktifkan.")
+        self.log_action("Nonaktifkan App", detail=package, status="OK", serial=serial)
+
+    def enable_selected_app(self):
+        package = self._get_selected_package()
+        if not package:
+            QMessageBox.warning(self, "Pilih aplikasi", "Pilih aplikasi dari daftar dulu.")
+            return
+        serial = self.current_device.serial
+        try:
+            enable_app(serial, package)
+        except ADBError as exc:
+            QMessageBox.critical(self, "Gagal", str(exc))
+            return
+        QMessageBox.information(self, "Berhasil", f"{package} diaktifkan.")
+        self.log_action("Aktifkan App", detail=package, status="OK", serial=serial)
 
     def uninstall_selected_app(self):
         package = self._get_selected_package()
@@ -2813,6 +2884,154 @@ class MainWindow(QMainWindow):
         card_layout.addWidget(self.mirror_view)
         layout.addWidget(card)
 
+        return page
+
+    def create_deepscan_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(16)
+
+        layout.addLayout(self._page_header(
+            "Deep Scan",
+            "Deteksi kerusakan lanjutan: baterai (keausan, siklus), port charge, umur storage, "
+            "restart sendiri, sentuh, modem, sensor, kamera, dan panas. Hanya membaca; hasil berupa "
+            "dugaan komponen dengan tingkat keyakinan."
+        ))
+
+        card, card_layout = self._card_panel("Pemindaian")
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        self.deepscan_start_button = QPushButton("▶ Mulai Deep Scan")
+        self.deepscan_start_button.setObjectName("actionPrimary")
+        self.deepscan_start_button.clicked.connect(self.start_deep_scan)
+        self.deepscan_touch_button = QPushButton("👆 Uji Sentuh (12 detik)")
+        self.deepscan_touch_button.setObjectName("action")
+        self.deepscan_touch_button.clicked.connect(self.start_deep_touch_test)
+        row.addWidget(self.deepscan_start_button)
+        row.addWidget(self.deepscan_touch_button)
+        row.addStretch()
+        card_layout.addLayout(row)
+
+        self.deepscan_status = QLabel("Hubungkan HP lalu tekan Mulai Deep Scan.")
+        self.deepscan_status.setObjectName("subtitle")
+        self.deepscan_status.setWordWrap(True)
+        card_layout.addWidget(self.deepscan_status)
+
+        self.deepscan_view = QTextBrowser()
+        self.deepscan_view.setMinimumHeight(460)
+        self.deepscan_view.setStyleSheet(
+            "background:#060706; border:1px solid #1e241e; border-radius:10px; padding:12px;"
+        )
+        card_layout.addWidget(self.deepscan_view)
+        layout.addWidget(card)
+
+        self._deepscan_facts = None
+        self._deepscan_serial = None
+        return page
+
+    def _deepscan_busy(self, busy: bool, text: str = ""):
+        self.deepscan_start_button.setEnabled(not busy)
+        self.deepscan_touch_button.setEnabled(not busy)
+        if text:
+            self.deepscan_status.setText(text)
+
+    def _render_deepscan(self):
+        facts = self._deepscan_facts or {}
+        report = deepscan_analyze(facts)
+        self.deepscan_view.setHtml(deepscan_html(report, facts.get("touch_test")))
+
+    def start_deep_scan(self):
+        if not self.current_device:
+            QMessageBox.warning(self, "Tidak ada device", "Hubungkan device terlebih dahulu.")
+            return
+        if getattr(self, "_deepscan_worker", None) and self._deepscan_worker.isRunning():
+            return
+
+        serial = self.current_device.serial
+        usb = is_usb_serial(serial)
+        self._deepscan_busy(True, "Memindai… (sekitar 10-30 detik, biarkan HP tetap tersambung)")
+
+        def _job():
+            return deepscan_collect(serial, usb_connected=usb)
+
+        def _done(facts):
+            previous = self._deepscan_facts if self._deepscan_serial == serial else None
+            if previous and previous.get("touch_test"):
+                facts["touch_test"] = previous["touch_test"]
+            self._deepscan_facts = facts
+            self._deepscan_serial = serial
+            self._deepscan_busy(False, "Selesai.")
+            self._render_deepscan()
+            self.log_action("Deep Scan", detail="", status="OK", serial=serial)
+
+        def _failed(message):
+            self._deepscan_busy(False, "Gagal.")
+            QMessageBox.critical(self, "Deep Scan gagal", message)
+
+        self._deepscan_worker = AsyncWorker(_job, self)
+        self._deepscan_worker.succeeded.connect(_done)
+        self._deepscan_worker.failed.connect(_failed)
+        self._deepscan_worker.start()
+
+    def start_deep_touch_test(self):
+        if not self.current_device:
+            QMessageBox.warning(self, "Tidak ada device", "Hubungkan device terlebih dahulu.")
+            return
+        if getattr(self, "_deepscan_worker", None) and self._deepscan_worker.isRunning():
+            return
+
+        QMessageBox.information(
+            self, "Uji Sentuh",
+            "Setelah menekan OK, sapukan jari ke SELURUH layar HP (atas ke bawah, kiri ke kanan) "
+            "selama 12 detik. Layar harus menyala dan tidak terkunci.",
+        )
+
+        serial = self.current_device.serial
+        self._deepscan_busy(True, "Uji sentuh berjalan: sapu seluruh layar HP sekarang (12 detik)…")
+
+        def _job():
+            from core.advanced_diagnosis import _default_runner
+            devices = parse_input_devices(_default_runner(serial, "getevent -lp"))
+            device = pick_touchscreen(devices)
+            if not device:
+                raise ADBError("Panel sentuh tidak terdeteksi di HP ini.")
+            return run_touch_test(serial, device, 12)
+
+        def _done(result):
+            facts = self._deepscan_facts if self._deepscan_serial == serial and self._deepscan_facts else {}
+            facts["touch_test"] = result
+            self._deepscan_facts = facts
+            self._deepscan_serial = serial
+            self._deepscan_busy(False, f"Uji sentuh selesai: {result['coverage'] * 100:.0f}% layar tersentuh.")
+            self._render_deepscan()
+            self.log_action("Deep Scan - Uji Sentuh", detail=f"{result['coverage'] * 100:.0f}%", status="OK", serial=serial)
+
+        def _failed(message):
+            self._deepscan_busy(False, "Uji sentuh gagal.")
+            QMessageBox.critical(self, "Uji sentuh gagal", message)
+
+        self._deepscan_worker = AsyncWorker(_job, self)
+        self._deepscan_worker.succeeded.connect(_done)
+        self._deepscan_worker.failed.connect(_failed)
+        self._deepscan_worker.start()
+
+    def create_realtime_mirror_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(16)
+
+        layout.addLayout(self._page_header(
+            "Mirror Real-time",
+            "Video langsung (scrcpy) dengan kontrol sentuh, tombol, ketik, dan scroll. "
+            "Bisa lewat kabel USB atau Wi-Fi (pair dengan kode atau QR)."
+        ))
+
+        card, card_layout = self._card_panel("Layar Device")
+        self.realtime_panel = RealtimeMirrorPanel(page)
+        card_layout.addWidget(self.realtime_panel)
+        layout.addWidget(card)
         return page
 
     def start_mirror(self):
@@ -6461,6 +6680,8 @@ class MainWindow(QMainWindow):
             self.logcat_streamer.stop()
         if self.screen_mirror:
             self.screen_mirror.stop()
+        if getattr(self, "realtime_panel", None) is not None:
+            self.realtime_panel.stop_mirror()
         event.accept()
 
 

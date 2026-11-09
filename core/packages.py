@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 
 from .adb import run_adb, ADBError
@@ -107,5 +108,40 @@ def trim_caches(serial: str) -> str:
     return run_adb("-s", serial, "shell", "pm", "trim-caches", "999999999999")
 
 
+_PACKAGE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$")
+
+# Paket yang kalau dimatikan bisa membuat HP tidak bisa dipakai.
+PROTECTED_PACKAGES = frozenset({
+    "android",
+    "com.android.systemui",
+    "com.android.settings",
+    "com.android.phone",
+    "com.android.shell",
+    "com.android.vending",
+    "com.google.android.gms",
+    "com.google.android.packageinstaller",
+    "com.android.packageinstaller",
+})
+
+
+def _checked_package(package_name: str) -> str:
+    package_name = (package_name or "").strip()
+    if not _PACKAGE_RE.match(package_name):
+        raise ADBError("Nama package tidak valid.")
+    if package_name in PROTECTED_PACKAGES or package_name.startswith("com.android.providers."):
+        raise ADBError(f"{package_name} penting bagi sistem, diblokir.")
+    return package_name
+
+
 def disable_app(serial: str, package_name: str) -> str:
+    """Nonaktifkan aplikasi untuk user 0 (bisa diaktifkan lagi)."""
+    package_name = _checked_package(package_name)
     return run_adb("-s", serial, "shell", "pm", "disable-user", "--user", "0", package_name)
+
+
+def enable_app(serial: str, package_name: str) -> str:
+    """Aktifkan lagi aplikasi yang tadi dinonaktifkan."""
+    package_name = (package_name or "").strip()
+    if not _PACKAGE_RE.match(package_name):
+        raise ADBError("Nama package tidak valid.")
+    return run_adb("-s", serial, "shell", "pm", "enable", package_name)
