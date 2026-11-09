@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Uji sensor</title>
+<style>body{margin:0;padding:24px;background:#0b1020;color:#eef;font:16px/1.5 system-ui,sans-serif}h1{font-size:1.2rem;margin:0 0 6px}p{color:#9fb0d0;margin:0 0 16px}pre{font:15px/1.7 ui-monospace,monospace;background:#141b33;border-radius:12px;padding:14px;white-space:pre-wrap}</style></head>
+<body><h1>Nexa · Uji sensor</h1><p>Biarkan halaman ini terbuka. Goyangkan dan miringkan HP selama uji berjalan.</p><pre id="o">menyalakan sensor…</pre>
+<script>
+const v={},o=document.getElementById("o");
+const show=()=>o.textContent=Object.entries(v).map(([k,x])=>k.padEnd(14)+x).join("\n")||"sensor tidak tersedia di browser ini";
+const f=(s)=>[s.x,s.y,s.z].map(n=>(n??0).toFixed(2)).join(", ");
+for(const [name,Cls] of [["accelerometer","Accelerometer"],["gyroscope","Gyroscope"],["magnetometer","Magnetometer"]]){
+  try{const s=new window[Cls]({frequency:30});s.addEventListener("reading",()=>{v[name]=f(s);show()});s.addEventListener("error",e=>{v[name]="error: "+e.error.name;show()});s.start()}catch(e){v[name]="tidak didukung"}
+}
+try{const l=new AmbientLightSensor({frequency:10});l.addEventListener("reading",()=>{v.cahaya=String(l.illuminance);show()});l.start()}catch(e){}
+addEventListener("devicemotion",e=>{const a=e.accelerationIncludingGravity;if(a){v.devicemotion=[a.x,a.y,a.z].map(n=>(n??0).toFixed(2)).join(", ");show()}});
+show();
+</script></body></html>

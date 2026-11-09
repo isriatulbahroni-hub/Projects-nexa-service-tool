@@ -28,6 +28,7 @@ export function parseSensors(text) {
   const list = [];
   let inRecent = false;
   let cur = null;
+  const stampsBy = {};
   for (const raw of String(text || "").split("\n")) {
     const line = raw.replace(/\r$/, "");
     const lm = line.match(/^\s*0x[0-9a-f]+\)\s*(.*?)\s*\|.*type:\s*([\w.]+)\((\d+)\)/i);
@@ -35,19 +36,23 @@ export function parseSensors(text) {
     if (/Recent Sensor events/i.test(line)) { inRecent = true; cur = null; continue; }
     if (!inRecent) continue;
     const hm = line.match(/^\s*(.+?):\s*last\s+(\d+)\s+events/i);
-    if (hm) { cur = hm[1].trim(); byName[cur] = []; continue; }
+    if (hm) { cur = hm[1].trim(); byName[cur] = []; stampsBy[cur] = []; continue; }
     const em = line.match(/\(ts=[^)]*\)\s*(.*)$/);
     if (em && cur) {
       const vals = em[1].split(",").map((s) => parseFloat(s)).filter(Number.isFinite);
-      if (vals.length) byName[cur].push(vals);
+      if (vals.length) {
+        byName[cur].push(vals);
+        const tm = line.match(/\(ts=([\d.]+)/);
+        stampsBy[cur].push(tm ? tm[1] : "");
+      }
     }
   }
   const out = {};
   for (const s of list) {
     const prev = out[s.type];
-    if (!prev || (/wake/i.test(prev.name) && !/wake/i.test(s.name))) out[s.type] = { name: s.name, events: [] };
+    if (!prev || (/wake/i.test(prev.name) && !/wake/i.test(s.name))) out[s.type] = { name: s.name, events: [], stamps: [] };
   }
-  for (const t of Object.keys(out)) out[t].events = byName[out[t].name] || [];
+  for (const t of Object.keys(out)) { out[t].events = byName[out[t].name] || []; out[t].stamps = stampsBy[out[t].name] || []; }
   return out;
 }
 
@@ -88,7 +93,7 @@ function sensorTable(s, verdict) {
     const val = last ? last.slice(0, 3).map((v) => v.toFixed(2)).join(", ") : "belum ada data";
     const vd = verdict ? verdict[t] : undefined;
     const cls = vd === true ? "pass" : vd === false ? "warn" : "info";
-    const txt = vd === true ? "Bereaksi" : vd === false ? "Tidak berubah" : "Ada";
+    const txt = vd === true ? "Bereaksi" : vd === false ? "Tidak berubah" : vd === "idle" ? "Tidak aktif (tidak diuji)" : "Ada";
     return `<tr><td>${esc(label)}<br><span class="muted">${esc(x.name)}</span></td><td class="${cls}">${txt}</td><td>${esc(val)}</td></tr>`;
   });
   return `<table><tr><th>Sensor</th><th>Status</th><th>Nilai terakhir</th></tr>${rows.join("")}</table>`;
@@ -184,18 +189,32 @@ export async function renderComponents(view, { sh, getId }) {
       },
       async move({ out }) {
         const samples = {};
+        const stamps = {};
         let last = {};
+        // Daftar "recent events" dumpsys hanya bergerak kalau ada aplikasi yang membaca sensor.
+        // Buka halaman kecil di browser HP supaya accelerometer/gyro/kompas benar-benar aktif.
+        await sh("input keyevent KEYCODE_WAKEUP");
+        await sh(`am start -a android.intent.action.VIEW -d '${location.origin}/sensor.html'`);
+        await sleep(2500);
         for (let i = 0; i < 12; i++) {
           out.innerHTML = `<p><b>Goyangkan HP, miringkan, tutup sensor dekat speaker, senter ke sensor cahaya.</b> ${12 - i} detik lagi.</p>`;
           last = parseSensors(await sh("dumpsys sensorservice"));
           for (const t of Object.keys(last)) {
-            const ev = last[t].events[last[t].events.length - 1];
-            if (ev) (samples[t] = samples[t] || []).push(ev);
+            const n = last[t].events.length;
+            const ev = last[t].events[n - 1];
+            if (ev) {
+              (samples[t] = samples[t] || []).push(ev);
+              (stamps[t] = stamps[t] || new Set()).add(last[t].stamps[n - 1] || JSON.stringify(ev));
+            }
           }
           await sleep(700);
         }
+        await sh("input keyevent KEYCODE_BACK");
         const verdict = {};
-        for (const [t] of WANT) verdict[t] = reacted(t, samples[t]);
+        for (const [t] of WANT) {
+          // cap waktu event terakhir tidak maju = sensor tidak sedang dipakai sistem (bukan tanda rusak)
+          verdict[t] = !stamps[t] || stamps[t].size < 2 ? (samples[t] ? "idle" : null) : reacted(t, samples[t]);
+        }
         out.innerHTML = sensorTable(last, verdict);
         const core = ["accelerometer", "proximity", "light"];
         const present = core.filter((t) => last[t]);
@@ -204,9 +223,13 @@ export async function renderComponents(view, { sh, getId }) {
           return true;
         }
         const bad = present.filter((t) => verdict[t] === false);
+        const idle = present.filter((t) => verdict[t] === "idle");
         const missing = core.filter((t) => !last[t]);
-        if (!bad.length && !missing.length && present.every((t) => verdict[t] === true)) record("sensor", "PASS", "Accelerometer, proximity, dan cahaya bereaksi.");
-        else record("sensor", "WARN", [bad.length ? `Tidak berubah: ${bad.join(", ")}.` : "", missing.length ? `Tidak terdeteksi: ${missing.join(", ")}.` : ""].filter(Boolean).join(" ") || "Data sensor kurang lengkap.");
+        if (idle.length) {
+          out.innerHTML += `<p class="muted">Proximity dan sensor cahaya biasanya hanya aktif saat sistem memakainya (mis. saat panggilan atau kecerahan otomatis menyala). Yang berstatus "Tidak aktif" bukan berarti rusak; uji manual: tutup bagian atas layar dengan tangan dan lihat layar mati saat panggilan, serta ubah kecerahan otomatis di bawah lampu terang.</p>`;
+        }
+        if (!bad.length && !missing.length && !idle.length && present.every((t) => verdict[t] === true)) record("sensor", "PASS", "Accelerometer, proximity, dan cahaya bereaksi.");
+        else record("sensor", "WARN", [bad.length ? `Tidak berubah: ${bad.join(", ")}.` : "", idle.length ? `Tidak aktif saat uji (perlu uji manual): ${idle.join(", ")}.` : "", missing.length ? `Tidak terdeteksi: ${missing.join(", ")}.` : ""].filter(Boolean).join(" ") || "Data sensor kurang lengkap.");
         return true;
       },
     },
