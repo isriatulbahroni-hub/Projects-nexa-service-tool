@@ -131,8 +131,14 @@ async function remoteSize(sh, path) {
 // jadi stdin TIDAK ditutup (menutup stdin di ADB menutup seluruh socket dan bisa memotong file).
 // Kalau macet, proses dimatikan supaya tidak menahan file dan koneksi USB untuk jalur berikutnya.
 async function pushViaShell(adb, sh, bytes, path, ms) {
-  await sh(`rm -f ${path}`);
-  const proc = await adb.subprocess.noneProtocol.spawn(`head -c ${bytes.length} > ${path}`);
+  // SEMUA panggilan ke HP diberi batas waktu: sebelumnya `rm`, `kill`, `chmod`, dan `stat` tanpa batas,
+  // jadi kalau jalur USB macet tampilan diam di "Mengirim server ke HP" sampai berminggu-minggu.
+  await withTimeout(sh(`rm -f ${path}`), 4000, "HP tidak merespons perintah awal (rm).");
+  const proc = await withTimeout(
+    adb.subprocess.noneProtocol.spawn(`head -c ${bytes.length} > ${path}`),
+    4000,
+    "HP tidak membuka shell untuk menerima server.",
+  );
   const finished = readAll(proc.output).catch(() => "");
   const work = (async () => {
     const writer = proc.stdin.getWriter();
@@ -147,11 +153,12 @@ async function pushViaShell(adb, sh, bytes, path, ms) {
   try {
     await withTimeout(work, ms, "Pengiriman ke HP macet.");
   } catch (e) {
-    try { await proc.kill(); } catch {}
+    // jangan menunggu kill selesai: kalau USB macet, kill pun ikut macet
+    try { Promise.resolve(proc.kill()).catch(() => {}); } catch {}
     throw e;
   }
-  await sh(`chmod 644 ${path}`);
-  const size = await remoteSize(sh, path);
+  await withTimeout(sh(`chmod 644 ${path}`), 4000, "HP tidak merespons (chmod).");
+  const size = await withTimeout(remoteSize(sh, path), 4000, "HP tidak merespons (cek ukuran).");
   if (size !== bytes.length) {
     throw new Error(`Ukuran file di HP tidak cocok (${size ?? "tidak ada"} dari ${bytes.length}).`);
   }
@@ -291,20 +298,28 @@ export function renderMirror(view, { sh, getAdb, helpHtml }) {
         lap("kirim (lewati)");
       } else {
         setStep("Mengirim server ke HP");
-        try {
-          await pushViaShell(adb, sh, server, DefaultServerPath, 8000);
-          lap("kirim");
-        } catch (e) {
-          const why = e?.message || String(e);
-          setStep(`Jalur utama gagal (${why}), mencoba jalur sync`);
-          lap("kirim-utama-gagal");
-          await withTimeout(
-            AdbScrcpyClient.pushServer(adb, chunkedStream(server), DefaultServerPath),
-            20000,
-            `Server tidak bisa dikirim ke HP (jalur utama: ${why}). Cabut dan colok kabel USB, lalu coba lagi.`,
-          );
-          lap("kirim (sync)");
-        }
+        const sendAll = async () => {
+          try {
+            await pushViaShell(adb, sh, server, DefaultServerPath, 8000);
+            lap("kirim");
+          } catch (e) {
+            const why = e?.message || String(e);
+            setStep(`Jalur utama gagal (${why}), mencoba jalur sync`);
+            lap("kirim-utama-gagal");
+            await withTimeout(
+              AdbScrcpyClient.pushServer(adb, chunkedStream(server), DefaultServerPath),
+              15000,
+              `Server tidak bisa dikirim ke HP (jalur utama: ${why}). Cabut dan colok kabel USB, lalu coba lagi.`,
+            );
+            lap("kirim (sync)");
+          }
+        };
+        // batas keras seluruh tahap kirim (jalur utama + cadangan) supaya tidak pernah menggantung
+        await withTimeout(
+          sendAll(),
+          35000,
+          "Pengiriman server ke HP macet (USB tidak merespons). Cabut dan colok kabel USB (pakai kabel data & port langsung, bukan hub), tutup aplikasi lain yang memakai ADB (adb.exe, scrcpy, Android Studio), lalu Hubungkan ulang.",
+        );
       }
       if (!alive()) return;
 
