@@ -154,6 +154,11 @@ def reboot_device(serial: str, mode: str = "system") -> str:
         "system": (),
         "recovery": ("recovery",),
         "bootloader": ("bootloader",),
+        # fastbootd = fastboot userspace (Android 10+), wajib untuk flash
+        # partisi logical (system/vendor/product/...). sideload = menerima
+        # paket OTA resmi lewat `adb sideload`.
+        "fastboot": ("fastboot",),
+        "sideload": ("sideload",),
     }
 
     if mode not in allowed_modes:

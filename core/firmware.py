@@ -157,3 +157,43 @@ def reboot_from_fastboot(serial: str | None = None) -> str:
     args.append("reboot")
 
     return run_fastboot(*args, timeout=30)
+
+
+# Partisi "logical" (dynamic partitions, Android 10+). Hanya bisa diflash dari
+# fastbootd (userspace fastboot), BUKAN dari bootloader biasa.
+LOGICAL_PARTITIONS = frozenset({
+    "system", "vendor", "product", "system_ext", "odm",
+    "system_dlkm", "vendor_dlkm", "odm_dlkm",
+})
+
+
+def parse_getvar_all(text: str) -> dict[str, str]:
+    """Parse keluaran `fastboot getvar all`. Baris asli berawalan '(bootloader) ' dan key bisa
+    memuat ':' (mis. 'partition-size:boot_a: 0x4000000'), jadi pisahkan di ': ' pertama."""
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("(bootloader)"):
+            line = line[len("(bootloader)"):].strip()
+        if ": " not in line:
+            continue
+        key, value = line.split(": ", 1)
+        out[key.strip()] = value.strip()
+    return out
+
+
+def get_fastboot_vars(serial: str | None = None) -> dict[str, str]:
+    """Baca `fastboot getvar all` jadi dict (read-only)."""
+    args = ["-s", serial] if serial else []
+    return parse_getvar_all(run_fastboot(*args, "getvar", "all", timeout=30))
+
+
+def reboot_to_fastbootd(serial: str | None = None) -> str:
+    """Pindah dari bootloader ke fastbootd (userspace fastboot)."""
+    args = ["-s", serial] if serial else []
+    return run_fastboot(*args, "reboot", "fastboot", timeout=30)
+
+
+def reboot_to_bootloader_from_fastboot(serial: str | None = None) -> str:
+    args = ["-s", serial] if serial else []
+    return run_fastboot(*args, "reboot", "bootloader", timeout=30)
