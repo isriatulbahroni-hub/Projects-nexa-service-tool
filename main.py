@@ -7,8 +7,10 @@ from app import QApplication, MainWindow, configure_logging, logger
 import sys
 
 from ui.mirror_integration import install_realtime_mirror
+from ui.repair_integration import install_repair_tools
 
 install_realtime_mirror(MainWindow)
+install_repair_tools(MainWindow)
 
 
 def main() -> int:
