@@ -164,6 +164,38 @@ async function pushViaShell(adb, sh, bytes, path, ms) {
   }
 }
 
+// Jalur paling andal: kirim lewat perintah shell kecil (base64 per potongan, `printf >> file`).
+// Tidak memakai aliran data besar (stdin/sync) yang di sebagian HP/kabel/port USB macet.
+function toBase64(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
+
+async function pushViaBase64(adb, sh, bytes, path, onProgress) {
+  const b64 = toBase64(bytes);
+  const tmp = `${path}.b64`;
+  const CH = 3000; // di bawah batas 4096 byte per perintah ADB
+  const run = (cmd) => withTimeout(
+    adb.subprocess.noneProtocol.spawn(cmd).wait(),
+    5000,
+    "HP tidak merespons saat menerima potongan server.",
+  );
+  await run(`rm -f ${path} ${tmp}`);
+  const total = Math.ceil(b64.length / CH);
+  for (let i = 0; i < total; i++) {
+    await run(`printf %s '${b64.slice(i * CH, (i + 1) * CH)}' >> ${tmp}`);
+    if (onProgress) onProgress(Math.round(((i + 1) / total) * 100));
+  }
+  await run(`base64 -d ${tmp} > ${path}; rm -f ${tmp}; chmod 644 ${path}`);
+  const size = await withTimeout(remoteSize(sh, path), 4000, "HP tidak merespons (cek ukuran).");
+  if (size !== bytes.length) {
+    throw new Error(`Ukuran file di HP tidak cocok (${size ?? "tidak ada"} dari ${bytes.length}). HP mungkin tidak punya perintah base64.`);
+  }
+}
+
 // ---------------------------------------------------------------
 // Halaman Mirror
 // ---------------------------------------------------------------
@@ -299,25 +331,26 @@ export function renderMirror(view, { sh, getAdb, helpHtml }) {
       } else {
         setStep("Mengirim server ke HP");
         const sendAll = async () => {
-          try {
-            await pushViaShell(adb, sh, server, DefaultServerPath, 8000);
-            lap("kirim");
-          } catch (e) {
-            const why = e?.message || String(e);
-            setStep(`Jalur utama gagal (${why}), mencoba jalur sync`);
-            lap("kirim-utama-gagal");
-            await withTimeout(
-              AdbScrcpyClient.pushServer(adb, chunkedStream(server), DefaultServerPath),
-              15000,
-              `Server tidak bisa dikirim ke HP (jalur utama: ${why}). Cabut dan colok kabel USB, lalu coba lagi.`,
-            );
-            lap("kirim (sync)");
-          }
+          const errs = [];
+          const tryWay = async (name, fn) => {
+            try { await fn(); lap(`kirim (${name})`); return true; }
+            catch (e) { errs.push(`${name}: ${e?.message || e}`); lap(`${name}-gagal`); return false; }
+          };
+          if (await tryWay("shell", () => pushViaBase64(adb, sh, server, DefaultServerPath, (pct) => setStep(`Mengirim server ke HP ${pct}%`)))) return;
+          setStep("Jalur shell gagal, mencoba jalur head");
+          if (await tryWay("head", () => pushViaShell(adb, sh, server, DefaultServerPath, 8000))) return;
+          setStep("Jalur head gagal, mencoba jalur sync");
+          if (await tryWay("sync", () => withTimeout(
+            AdbScrcpyClient.pushServer(adb, chunkedStream(server), DefaultServerPath),
+            12000,
+            "sync macet.",
+          ))) return;
+          throw new Error(`Server tidak bisa dikirim ke HP. ${errs.join(" | ")}. Cabut dan colok kabel USB, lalu coba lagi.`);
         };
         // batas keras seluruh tahap kirim (jalur utama + cadangan) supaya tidak pernah menggantung
         await withTimeout(
           sendAll(),
-          35000,
+          60000,
           "Pengiriman server ke HP macet (USB tidak merespons). Cabut dan colok kabel USB (pakai kabel data & port langsung, bukan hub), tutup aplikasi lain yang memakai ADB (adb.exe, scrcpy, Android Studio), lalu Hubungkan ulang.",
         );
       }
