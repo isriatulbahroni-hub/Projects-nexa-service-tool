@@ -35,6 +35,7 @@ tests/             tes (pytest, lihat pytest.ini)
 web/               versi web (Vite) + konfigurasi Vercel
   src/main.js      aplikasi utama, halaman, koneksi ADB, mirror
   src/repair.js    halaman Perbaikan
+  src/deepscan.js  halaman Deep Scan; deepscan-engine.js: parser dan aturan penyimpul
   src/triase.js    halaman Triase HP
   src/health.js    skor kesehatan; live.js, report.js, store.js: pantauan, laporan, riwayat
   scripts/         fetch-scrcpy-server.mjs
@@ -77,6 +78,7 @@ npm run dev
 |---|---|---|
 | Dashboard | Model, versi Android, security patch, serial, baterai, suhu, storage, RAM, IP Wi-Fi, skor kesehatan, sebelum/sesudah servis, laporan pelanggan | Baca-saja |
 | Info Device | Semua properti `getprop`, bisa dicari | Belum menampilkan IMEI |
+| **Deep Scan** | Deteksi kerusakan lanjutan: keausan baterai (siklus, kapasitas asli), port charge, umur dan kecepatan storage, riwayat restart/kernel panic, panas, modem/baseband, sensor, kamera, plus **uji sentuh** (peta zona layar yang tidak merespons). Hasil berupa dugaan komponen dengan tingkat keyakinan dan bukti | Hanya membaca. Aturan sama dengan desktop (`core/advanced_diagnosis.py`). Belum diuji dengan HP asli; data yang tidak terbaca ditampilkan apa adanya, tidak ditebak |
 | Hardware Test | Kesehatan baterai, suhu, thermal, RAM, storage, Wi-Fi, SIM, crash/ANR di logcat; keberadaan komponen | Baris komponen (kamera, sensor, dll.) berstatus INFO "Ada di spesifikasi": HP mengaku punya komponen itu, bukan berarti berfungsi |
 | Security | Verified boot, bootloader, enkripsi, SELinux, umur security patch, build debuggable, cek file `su`, setup wizard | Cek root hanya mencari file `su`; Magisk modern bisa lolos. Status bootloader di web hanya membaca `ro.boot.flash.locked`, jadi di banyak merek tampil "-" (desktop sudah punya cadangan) |
 | Aplikasi | Daftar paket pihak ketiga dan sistem, detail versi | Baca-saja; aksinya ada di Perbaikan |
@@ -123,7 +125,7 @@ python main.py
 Dependensi: PySide6 (GUI), reportlab (PDF), psutil, pyzipper (arsip zip), av (decode video scrcpy), qrcode[pil] (QR pairing).
 Butuh `adb` dan `fastboot` (platform-tools). Lokasi default diatur di `core/config.py`; `core/tool_router.py` mencari di PATH sebagai cadangan.
 
-Tes: `python -m pytest` (197 tes lulus per 8 Nov 2026, dijalankan tanpa HP asli).
+Tes desktop: `python -m pytest` (234 tes lulus per 8 Nov 2026, tanpa HP asli). Tes web: `cd web && npm test` (21 tes; kasus Deep Scan memakai berkas yang sama dengan desktop, `tests/fixtures/deepscan_cases.json`, supaya kedua versi menyimpulkan sama).
 
 ### Modul yang sudah diverifikasi isinya
 
@@ -132,8 +134,9 @@ Tes: `python -m pytest` (197 tes lulus per 8 Nov 2026, dijalankan tanpa HP asli)
 - **`core/frp_service.py`**: alur FRP **verifikasi**, bukan bypass. Membaca status device, reboot standar ke recovery/bootloader (hanya mode yang di-allowlist), verifikasi ulang. Tombol aksi hanya aktif bila verifikasi pemilik tidak diwajibkan. Status setup/provisioning dibaca lewat `settings get` (bukan `getprop`).
 - **`core/tool_router.py`**: mencari `adb`/`fastboot` dan merekomendasikan tool **resmi** per merek. Tidak pernah mengunduh atau menjalankan tool unlock pihak ketiga.
 - **Deteksi merek** (`_infer_brand_group` di `core/locked_device_recovery.py`): Samsung, Xiaomi/Redmi/POCO, OPPO/realme, vivo/iQOO, Infinix/TECNO, itel, Motorola, Lenovo, Nokia/HMD, Google Pixel, OnePlus, Huawei/Honor, Sony, ASUS. Merek lain tampil apa adanya dengan tool ADB/Fastboot standar.
+- **`core/advanced_diagnosis.py`** (halaman **Deep Scan** di desktop): probe baca-saja, parser, dan penyimpul yang menghasilkan dugaan komponen rusak (baterai, port charge/IC pengisian, storage, mainboard/catu daya, layar/touch, modem, sensor, kamera, software, panas) beserta keyakinan dan bukti. Uji sentuh merekam `getevent` selama 12 detik dan memetakan sel layar yang tidak tersentuh (posisi dicatat per SYN_REPORT dan per jari). Probe yang gagal dicatat "tidak terbaca", tidak pernah ditebak. Aturan sama dengan `web/src/deepscan-engine.js`; ubah keduanya bersamaan.
 - **`core/security_check.py`**: status bootloader dibaca dari `ro.boot.flash.locked`, lalu cadangan `ro.boot.vbmeta.device_state` dan `verifiedbootstate=orange`.
-- **Mirror**: `core/mirror.py` (screenshot berulang), `core/scrcpy_client.py` + `core/realtime_mirror.py` + `ui/realtime_mirror_page.py` (scrcpy real-time, kontrol sentuh/tombol/teks/scroll), `core/wireless_adb.py` (ADB Wi-Fi: pair lewat kode atau QR). Semua ini datang dari PR #1 (sudah di-merge ke `main`), dengan server scrcpy v5.0.1. Panel baru **belum terpasang di `app.py`** per 7 Nov 2026.
+- **Mirror**: `core/mirror.py` (screenshot berulang), `core/scrcpy_client.py` + `core/realtime_mirror.py` + `ui/realtime_mirror_page.py` (scrcpy real-time, kontrol sentuh/tombol/teks/scroll), `core/wireless_adb.py` (ADB Wi-Fi: pair lewat kode atau QR). Semua ini datang dari PR #1 (sudah di-merge ke `main`), dengan server scrcpy v5.0.1. Panel real-time sudah terpasang di `app.py` sebagai halaman **Mirror Real-time**. App Manager punya tombol **Nonaktifkan/Aktifkan** aplikasi (paket sistem penting diblokir).
 
 ### Modul lain (ringkasan dari nama file, **belum diverifikasi isinya**)
 
@@ -158,7 +161,7 @@ Baca modulnya sebelum mengubah atau mendokumentasikan lebih lanjut.
 3. Proteksi SSO Vercel membuat URL deployment meminta login Vercel.
 4. Branch lama yang belum digabung ke `main`: `feat/usb-diagnostics` (`core/usb_diagnostics.py` belum ada), `fix/frp-button-gating-imei-fallback` (gating tombol reboot FRP dan fallback IMEI belum masuk; perbaikan Smart Scan sudah ada di `main`), `fix/ui-click-responsiveness` (gerbang lisensi/login yang commit terakhirnya menonaktifkannya; perbaikan status FRP sudah masuk lewat PR #9). Cek sebelum mengerjakan fitur serupa agar tidak dobel.
 5. Info Device belum menampilkan IMEI.
-6. Belum ada jumlah siklus charge dan kapasitas asli baterai di desktop maupun web.
+6. Siklus charge dan kapasitas asli baterai hanya terbaca kalau HP membuka berkas sysfs-nya (`cycle_count`, `charge_full`, `charge_full_design`); banyak merek menyembunyikannya. Deep Scan menulis "tidak terbaca" kalau begitu.
 7. Mode yang tidak lewat ADB/fastboot (Samsung Download/Odin, MediaTek, Qualcomm EDL) tidak bisa dibaca; alat hanya merekomendasikan tool resmi.
 
 ---
@@ -166,10 +169,10 @@ Baca modulnya sebelum mengubah atau mendokumentasikan lebih lanjut.
 ## Rencana (urut prioritas)
 
 1. Uji Mirror dan Perbaikan web dengan HP asli lewat kabel OTG; perbaiki perintah yang gagal di Android/merek tertentu.
-2. Kondisi baterai: jumlah siklus dan kapasitas asli lawan saat ini.
+2. Uji Deep Scan dengan HP asli berbagai merek; sesuaikan ambang dan sumber data (sysfs, dumpsys) yang berbeda antar merek.
 3. IMEI di web dan fallback IMEI di desktop; bootloader di web dengan cadangan seperti desktop.
 4. Web: keyboard dan scroll di Mirror, tombol Power/Volume, ikon PNG untuk PWA.
-5. Desktop: pasang panel mirror real-time dan ADB Wi-Fi ke `app.py`; wire lisensi dan login teknisi.
+5. Desktop: wire lisensi dan login teknisi.
 6. Web: fitur bisnis (kasus servis, nota) yang saat ini hanya ada di desktop.
 7. Aplikasi Android (Capacitor atau Kotlin) dengan library ADB-over-TCP untuk jalur Wi-Fi tanpa PC.
 

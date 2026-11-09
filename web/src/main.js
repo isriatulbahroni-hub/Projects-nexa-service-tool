@@ -11,6 +11,7 @@ import { AdbScrcpyClient, AdbScrcpyOptions5_0_1 } from "@yume-chan/adb-scrcpy";
 import { DefaultServerPath } from "@yume-chan/scrcpy";
 import { BitmapVideoFrameRenderer, WebCodecsVideoDecoder } from "@yume-chan/scrcpy-decoder-webcodecs";
 import { renderRepair } from "./repair.js";
+import { renderDeepScan } from "./deepscan.js";
 
 // PWA: daftarkan service worker hanya di build produksi
 if ("serviceWorker" in navigator && import.meta.env.PROD) {
@@ -58,6 +59,7 @@ const PAGES = [
   ["dashboard", "Dashboard"],
   ["info", "Info Device"],
   ["hardware", "Hardware Test"],
+  ["deepscan", "Deep Scan"],
   ["security", "Security"],
   ["apps", "Aplikasi"],
   ["files", "File"],
@@ -74,6 +76,11 @@ async function sh(cmd) {
   } catch (e) {
     return "";
   }
+}
+// Seperti sh(), tapi melempar error kalau perintah gagal dijalankan (sh() menelan error jadi "").
+async function shStrict(cmd) {
+  if (!adb) throw new Error("Device belum terhubung.");
+  return (await adb.subprocess.noneProtocol.spawn(cmd).wait().toString()).trim();
 }
 async function shBytes(cmd) {
   return adb.subprocess.noneProtocol.spawn(cmd).wait();
@@ -460,6 +467,10 @@ const PAGE_RENDER = {
     view.querySelectorAll("[data-dir]").forEach((el) => {
       el.onclick = () => PAGE_RENDER.files(view, path.replace(/\/$/, "") + "/" + el.dataset.dir);
     });
+  },
+
+  async deepscan(view) {
+    await renderDeepScan(view, { runStrict: shStrict, esc });
   },
 
   async repair(view) {
