@@ -11,6 +11,12 @@ import { renderRepair } from "./repair.js";
 import { attachPkgPicker } from "./picker.js";
 import { renderMirror, stopMirror, closeMirrorSync, prefetchServer } from "./mirror.js";
 import { renderManualTests } from "./manual-tests.js";
+import { renderBattery } from "./battery.js";
+import { renderComponents } from "./components.js";
+import { renderStorage } from "./storage.js";
+import { renderService } from "./service.js";
+import { renderAnalyzer } from "./analyze.js";
+import { renderTransfer, extendMirror } from "./transfer.js";
 
 // PWA: daftarkan service worker hanya di build produksi
 if ("serviceWorker" in navigator && import.meta.env.PROD) {
@@ -24,6 +30,7 @@ if ("serviceWorker" in navigator && import.meta.env.PROD) {
 // ---------------------------------------------------------------
 let adb = null;
 let device = null;
+let deviceId = "";
 let connecting = false;
 let currentPage = "dashboard";
 let stopLive = () => {};
@@ -55,10 +62,14 @@ const PAGES = [
   ["dashboard", "Dashboard"],
   ["info", "Info Device"],
   ["hardware", "Hardware Test"],
+  ["battery", "Baterai"],
+  ["components", "Uji Komponen"],
+  ["storage", "Penyimpanan"],
   ["security", "Security"],
   ["apps", "Aplikasi"],
   ["files", "File"],
   ["repair", "Perbaikan"],
+  ["service", "Servis & Laporan"],
   ["mirror", "Mirror"],
   ["terminal", "Terminal & Log"],
   ["triase", "Triase HP"],
@@ -76,6 +87,13 @@ async function shBytes(cmd) {
   return adb.subprocess.noneProtocol.spawn(cmd).wait();
 }
 const prop = (k) => sh(`getprop ${k}`);
+// ID HP untuk riwayat, hasil uji, dan tiket servis (sama dengan yang dipakai Dashboard).
+const getId = () => (adb ? deviceId : "");
+// Simpan fungsi pembersih halaman hanya kalau halamannya masih yang aktif.
+const keep = (page, cleanup) => {
+  if (currentPage === page) stopLive = cleanup || (() => {});
+  else if (cleanup) cleanup();
+};
 
 function statusClass(s) {
   return { PASS: "pass", WARN: "warn", FAIL: "fail", INFO: "info" }[s] || "info";
@@ -140,7 +158,7 @@ function needDevice() {
       <p>Colokkan HP lewat kabel USB, aktifkan <b>USB debugging</b>, lalu tekan <b>Hubungkan HP (USB)</b>. HP yang pernah diizinkan akan tersambung otomatis, tanpa dialog pemilih.</p>
       <p class="muted">Syarat: browser Chrome/Edge (desktop) atau Chrome Android dengan kabel OTG, halaman HTTPS.
       Kalau gagal "Access denied": di komputer jalankan <code>adb kill-server</code> (ADB server bawaan merebut koneksi USB) dan tutup aplikasi lain yang memakai ADB.</p>
-      <p>HP tidak bisa menyala atau terkunci? <button data-page="triase">Buka Triase HP</button></p>
+      <p>HP tidak bisa menyala atau terkunci? <button data-page="triase">Buka Triase HP</button> <button data-page="service">Buka Servis &amp; Laporan</button></p>
       <div class="row"><button id="pickOther">Pilih perangkat lain</button><button id="forgetKey">Hapus kunci ADB browser ini</button></div>
       <p class="muted">Kunci ADB tersimpan di browser ini supaya HP tidak minta izin berulang. Hapus kalau perangkat ini dipinjamkan atau dipakai bersama.</p>
     </div>`;
@@ -162,7 +180,8 @@ async function go(page) {
   stopLive = () => {};
   currentPage = page;
   document.querySelectorAll("#nav button, #bnav button[data-page]").forEach((b) => b.classList.toggle("active", b.dataset.page === page));
-  if (!adb && page !== "triase") return needDevice();
+  // Servis & Laporan tetap bisa dibuka tanpa HP (riwayat tiket dan cetak laporan)
+  if (!adb && page !== "triase" && page !== "service") return needDevice();
   const view = $("#view");
   view.innerHTML = `<p class="muted">Memuat…</p>`;
   try {
@@ -224,11 +243,13 @@ async function connectTo(dev, { silent = false } = {}) {
         transport.disconnected.then(() => {
           if (adb !== mine) return;
           adb = null;
+          deviceId = "";
           stopMirror();
           setConn("Terputus", false);
           go(currentPage);
         });
         const model = await prop("ro.product.model");
+        deviceId = (await prop("ro.serialno")) || dev.serial || "";
         connecting = false;
         setConn(`Terhubung: ${model || dev.serial}`, true);
         go("dashboard");
@@ -249,6 +270,7 @@ async function connectTo(dev, { silent = false } = {}) {
     throw lastErr;
   } catch (e) {
     adb = null;
+    deviceId = "";
     connecting = false;
     setConn("Gagal terhubung", false);
     if (!silent) showConnectError(e);
@@ -304,6 +326,7 @@ async function disconnect() {
   await stopMirror();
   try { await adb?.close(); } catch {}
   adb = null;
+  deviceId = "";
   setConn("Belum terhubung", false);
   go(currentPage);
 }
@@ -474,6 +497,22 @@ const PAGE_RENDER = {
     await runHardwareTests();
   },
 
+  async battery(view) {
+    keep("battery", await renderBattery(view, { sh, getId }));
+  },
+
+  async components(view) {
+    keep("components", await renderComponents(view, { sh, getId }));
+  },
+
+  async storage(view) {
+    await renderStorage(view, { sh, getId });
+  },
+
+  async service(view) {
+    keep("service", await renderService(view, { sh, getId, connected: () => !!adb }));
+  },
+
   async security(view) {
     const [vb, locked, crypto, selinux, patch, debuggable, su, setup, prov, build] = await Promise.all([
       prop("ro.boot.verifiedbootstate"), prop("ro.boot.flash.locked"), prop("ro.crypto.state"),
@@ -551,11 +590,13 @@ const PAGE_RENDER = {
       <div class="card"><h2>${esc(path)}</h2>
         <p class="muted">Untuk backup folder atau mengunduh file besar, pakai halaman <b>Perbaikan</b>, bagian Penyimpanan.</p>
         <div class="row"><button id="up">⬆ Naik</button></div>
-        <table>${entries.map((e) => `<tr><td>${e.dir ? "📁" : "📄"} ${e.dir ? `<span class="link" data-dir="${esc(e.name)}">${esc(e.name)}</span>` : esc(e.name)}</td><td class="muted">${e.dir ? "" : esc(e.size)}</td><td class="muted">${esc(e.date)}</td></tr>`).join("") || `<tr><td class="muted">(kosong / tidak ada izin)</td></tr>`}</table></div>`;
+        <table>${entries.map((e) => `<tr><td>${e.dir ? "📁" : "📄"} ${e.dir ? `<span class="link" data-dir="${esc(e.name)}">${esc(e.name)}</span>` : esc(e.name)}</td><td class="muted">${e.dir ? "" : esc(e.size)}</td><td class="muted">${esc(e.date)}</td></tr>`).join("") || `<tr><td class="muted">(kosong / tidak ada izin)</td></tr>`}</table></div>
+      <div id="xfer"></div>`;
     $("#up").onclick = () => PAGE_RENDER.files(view, parent);
     view.querySelectorAll("[data-dir]").forEach((el) => {
       el.onclick = () => PAGE_RENDER.files(view, path.replace(/\/$/, "") + "/" + el.dataset.dir);
     });
+    renderTransfer($("#xfer"), { getAdb: () => adb, sh, dir: path });
   },
 
   async repair(view) {
@@ -565,10 +606,12 @@ const PAGE_RENDER = {
 
   async mirror(view) {
     renderMirror(view, { sh, getAdb: () => adb, helpHtml: MIRROR_HELP });
+    extendMirror(view);
   },
 
   async terminal(view) {
     view.innerHTML = `
+      <div id="loga"></div>
       <div class="card"><h2>Terminal ADB shell</h2>
         <p class="muted">Perintah di sini bisa mengubah HP. Konfirmasi hanya muncul untuk kata kunci tertentu, jadi periksa perintahmu sendiri.</p>
         <div class="row"><input id="cmd" placeholder="mis. getprop ro.product.model" /><button id="exec" class="primary">Jalankan</button></div>
@@ -580,6 +623,7 @@ const PAGE_RENDER = {
           <button data-c="df -h">Storage</button>
         </div>
         <pre id="out">(hasil muncul di sini)</pre></div>`;
+    renderAnalyzer($("#loga"), { sh });
     const DANGER = /(\brm\b|\bwipe\b|\bformat\b|\bdd\b|\breboot\b|\bflash|\bmkfs|\bsetprop\b|\bpm (clear|uninstall|disable|disable-user|enable)\b|\bam force-stop\b|\bsvc\b|\bcmd package\b|\bsettings put\b)/;
     const run = async (c) => {
       if (!c.trim()) return;
@@ -643,7 +687,7 @@ async function runHardwareTests() {
     ["Accelerometer", "android.hardware.sensor.accelerometer"], ["Gyroscope", "android.hardware.sensor.gyroscope"],
     ["Proximity", "android.hardware.sensor.proximity"], ["Light sensor", "android.hardware.sensor.light"],
   ]) {
-    add(name, "INFO", hasFeature(feat) ? "Ada di spesifikasi" : "Tidak tercantum", "HP mengaku punya komponen ini; belum tentu berfungsi.");
+    add(name, "INFO", hasFeature(feat) ? "Ada di spesifikasi" : "Tidak tercantum", "HP mengaku punya komponen ini; belum tentu berfungsi. Uji nyata ada di Uji Komponen.");
   }
 
   const sim = await prop("gsm.sim.state");
