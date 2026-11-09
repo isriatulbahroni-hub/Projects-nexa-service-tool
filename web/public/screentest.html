@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0f4c4a">
+<title>Uji layar HP | Nexa Service Tool</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;overflow:hidden;background:#0f4c4a;color:#eaf3f0;font:500 16px/1.5 system-ui,"Segoe UI",sans-serif;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+main{height:100%;max-width:480px;margin:0 auto;padding:max(24px,env(safe-area-inset-top)) 24px max(24px,env(safe-area-inset-bottom));display:flex;flex-direction:column;justify-content:center;gap:14px}
+h1{margin:0;font-size:1.6rem;line-height:1.15}
+p{margin:0;opacity:.85}
+button{min-height:58px;padding:0 18px;border:2px solid #eaf3f0;border-radius:8px;background:transparent;color:inherit;font:inherit;font-weight:700;text-align:left}
+button.go{background:#e9b300;border-color:#e9b300;color:#1b1500}
+small{opacity:.7}
+#stage{position:fixed;inset:0;display:none;touch-action:none}
+#stage.on{display:block}
+#stage.touch{display:none;grid-gap:2px;background:#0b3735}
+#stage.touch.on{display:grid}
+.cell{background:#16615d;border-radius:2px}
+.cell.hit{background:#7fe0b6}
+#tag{position:fixed;left:0;right:0;bottom:max(24px,env(safe-area-inset-bottom));text-align:center;font-weight:700;pointer-events:none;transition:opacity .4s}
+#cnt{position:fixed;top:max(14px,env(safe-area-inset-top));left:0;right:0;text-align:center;font-weight:800;font-size:1.3rem;pointer-events:none;text-shadow:0 1px 3px rgba(0,0,0,.7)}
+#done{position:fixed;inset:0;display:none;flex-direction:column;justify-content:center;gap:14px;padding:24px;background:#0f4c4a}
+#done.on{display:flex}
+#done h1,#done p,#done button{max-width:420px;width:100%;margin-left:auto;margin-right:auto}
+@media (prefers-reduced-motion:reduce){#tag{transition:none}}
+</style>
+</head>
+<body>
+<main id="menu">
+  <h1>Uji layar HP</h1>
+  <p id="info"></p>
+  <button class="go" id="bColor">Uji warna layar<br><small>Cari piksel mati, garis, bercak, dan layar menguning</small></button>
+  <button id="bTouch">Uji sentuhan layar<br><small>Usap seluruh layar sampai semua kotak menyala</small></button>
+  <p><small>Untuk keluar dari uji, tekan tombol Kembali di HP.</small></p>
+</main>
+<div id="stage"></div>
+<div id="done"><h1 id="doneT"></h1><p id="doneP"></p><button class="go" id="again">Ulangi</button><button id="back">Kembali ke menu</button></div>
+<script>
+(function () {
+  var $ = function (s) { return document.querySelector(s); };
+  var stage = $("#stage"), menu = $("#menu"), done = $("#done");
+  var mode = "";
+  $("#info").textContent = "Layar " + screen.width + " x " + screen.height + " piksel CSS, skala " + (window.devicePixelRatio || 1) + "x.";
+
+  var COLORS = [["Merah", "#ff0000"], ["Hijau", "#00ff00"], ["Biru", "#0000ff"], ["Putih", "#ffffff"], ["Hitam", "#000000"], ["Abu-abu", "#808080"]];
+
+  function fullscreen() {
+    try { var p = document.documentElement.requestFullscreen && document.documentElement.requestFullscreen(); if (p && p.catch) p.catch(function () {}); } catch (e) {}
+    try { if (navigator.wakeLock) navigator.wakeLock.request("screen").catch(function () {}); } catch (e) {}
+  }
+  function show(el) { menu.style.display = "none"; done.classList.remove("on"); stage.className = ""; el(); stage.classList.add("on"); }
+  function finish(title, text) { stage.classList.remove("on"); $("#doneT").textContent = title; $("#doneP").textContent = text; done.classList.add("on"); }
+
+  function colorMode() {
+    mode = "warna";
+    var i = 0, timer = 0;
+    stage.innerHTML = '<div id="tag"></div>';
+    function paint() {
+      var c = COLORS[i];
+      stage.style.background = c[1];
+      var tag = $("#tag");
+      tag.textContent = c[0] + " (" + (i + 1) + " dari " + COLORS.length + "). Ketuk untuk lanjut.";
+      tag.style.color = (c[1] === "#ffffff" || c[1] === "#00ff00") ? "#000" : "#fff";
+      tag.style.opacity = 1;
+      clearTimeout(timer);
+      timer = setTimeout(function () { tag.style.opacity = 0; }, 1600);
+    }
+    stage.onclick = function () {
+      i++;
+      if (i >= COLORS.length) { stage.style.background = ""; finish("Uji warna selesai", "Kembali ke komputer lalu nilai hasilnya: ada piksel mati, garis, bercak, atau warna yang tidak rata?"); return; }
+      paint();
+    };
+    paint();
+  }
+
+  function touchMode() {
+    mode = "sentuh";
+    stage.style.background = "";
+    var cols = 6, rows = Math.max(6, Math.round(cols * window.innerHeight / window.innerWidth));
+    var total = cols * rows, hit = 0, html = "";
+    for (var k = 0; k < total; k++) html += '<b class="cell"></b>';
+    stage.innerHTML = html + '<div id="cnt"></div>';
+    stage.style.gridTemplateColumns = "repeat(" + cols + ",1fr)";
+    stage.style.gridTemplateRows = "repeat(" + rows + ",1fr)";
+    var cnt = $("#cnt");
+    cnt.textContent = "0 dari " + total;
+    function mark(x, y) {
+      var el = document.elementFromPoint(x, y);
+      if (el && el.classList.contains("cell") && !el.classList.contains("hit")) {
+        el.classList.add("hit");
+        hit++;
+        cnt.textContent = hit + " dari " + total;
+        if (hit === total) finish("Semua area merespons", "Seluruh " + total + " kotak menyala. Sentuhan layar bekerja di semua area.");
+      }
+    }
+    stage.onpointerdown = function (e) { mark(e.clientX, e.clientY); };
+    stage.onpointermove = function (e) { mark(e.clientX, e.clientY); };
+    stage.onclick = null;
+  }
+
+  function start(m) {
+    fullscreen();
+    if (m === "sentuh") { stage.className = "touch"; show(touchMode); stage.classList.add("touch"); }
+    else show(colorMode);
+  }
+  function toMenu() {
+    stage.classList.remove("on"); done.classList.remove("on"); menu.style.display = "";
+    try { if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen(); } catch (e) {}
+  }
+
+  $("#bColor").onclick = function () { start("warna"); };
+  $("#bTouch").onclick = function () { start("sentuh"); };
+  $("#again").onclick = function () { start(mode || "warna"); };
+  $("#back").onclick = toMenu;
+
+  var h = location.hash.replace("#", "");
+  if (h === "warna" || h === "sentuh") {
+    // dibuka dari komputer: tampilkan menu dulu, uji dimulai setelah satu ketukan (diwajibkan browser untuk layar penuh)
+    $("#info").textContent += " Ketuk tombol di bawah untuk memulai.";
+    (h === "sentuh" ? $("#bTouch") : $("#bColor")).classList.add("go");
+    (h === "sentuh" ? $("#bColor") : $("#bTouch")).classList.remove("go");
+  }
+})();
+</script>
+</body>
+</html>
