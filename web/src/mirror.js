@@ -20,7 +20,8 @@ const PROFILE_KEY = "nexa-mirror-profile";
 const PROFILES = {
   ringan: { label: "Ringan (720p, tercepat)", maxSize: 720, maxFps: 24, videoBitRate: 2_000_000 },
   normal: { label: "Normal (1024p)", maxSize: 1024, maxFps: 30, videoBitRate: 4_000_000 },
-  tajam: { label: "Tajam (1600p)", maxSize: 1600, maxFps: 30, videoBitRate: 8_000_000 },
+  tajam: { label: "Tajam (1600p)", maxSize: 1600, maxFps: 30, videoBitRate: 12_000_000 },
+  asli: { label: "Asli (resolusi penuh, paling jelas)", maxSize: 0, maxFps: 30, videoBitRate: 16_000_000 },
 };
 
 // Ikon garis sederhana (stroke mengikuti warna teks tombol)
@@ -177,7 +178,9 @@ function toBase64(bytes) {
 async function pushViaBase64(adb, sh, bytes, path, onProgress) {
   const b64 = toBase64(bytes);
   const tmp = `${path}.b64`;
-  const CH = 3000; // di bawah batas 4096 byte per perintah ADB
+  // potongan mengikuti batas payload ADB yang dinegosiasikan (HP baru jauh lebih besar), minimal aman 3000
+  const mp = Number(adb.maxPayloadSize) || 4096;
+  const CH = Math.max(3000, Math.min(48000, mp - 400));
   const run = (cmd) => withTimeout(
     adb.subprocess.noneProtocol.spawn(cmd).wait(),
     5000,
