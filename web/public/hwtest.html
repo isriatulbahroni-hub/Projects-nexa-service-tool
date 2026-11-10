@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Uji langsung di HP</title>
+<style>
+:root{color-scheme:dark}
+body{margin:0;padding:16px;background:#0b1020;color:#eef;font:16px/1.5 system-ui,sans-serif}
+h1{font-size:1.25rem;margin:0 0 4px}
+.sub{color:#9fb0d0;margin:0 0 16px}
+.card{background:#141b33;border-radius:14px;padding:14px;margin:0 0 12px;scroll-margin-top:12px}
+.card h2{font-size:1rem;margin:0 0 4px}
+.hint{color:#9fb0d0;font-size:.9rem;margin:0 0 10px}
+.row{display:flex;flex-wrap:wrap;gap:8px}
+button{font:inherit;color:#fff;background:#3b5bdb;border:0;border-radius:10px;padding:10px 14px;min-height:44px}
+.out{margin-top:10px;font-size:.95rem;white-space:pre-wrap;word-break:break-word}
+.pass{color:#4ade80}.warn{color:#fbbf24}.fail{color:#f87171}.info{color:#9fb0d0}
+.meter{height:10px;border-radius:6px;background:#0b1020;overflow:hidden;margin-top:10px}
+.meter i{display:block;height:100%;width:0;background:#4ade80}
+</style></head>
+<body>
+<h1>Nexa · Uji langsung di HP</h1>
+<p class="sub">Ketuk tombol di tiap kartu. Naikkan volume media dan izinkan akses yang diminta browser. Gunakan Chrome.</p>
+<div id="app"></div>
+<script>
+const $ = (s) => document.querySelector(s);
+const say = (id, cls, text) => { const o = $("#o-" + id); if (o) { o.className = "out " + cls; o.textContent = text; } };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let ac;
+const audio = () => {
+  ac = ac || new (window.AudioContext || window.webkitAudioContext)();
+  if (ac.state === "suspended") ac.resume();
+  return ac;
+};
+
+// --- Getaran ---
+function vib(pattern) {
+  if (!("vibrate" in navigator)) return say("getar", "fail", "Browser ini tidak mendukung getaran. Pakai Chrome di Android.");
+  const ok = navigator.vibrate(pattern);
+  say("getar", ok ? "info" : "warn", ok
+    ? "Getar dikirim. Terasa? Kalau tidak terasa, cek mode hemat baterai dan pengaturan getar, lalu ulangi. Kalau tetap diam, motor getar kemungkinan rusak."
+    : "Browser menolak perintah getar (cek pengaturan getar atau mode hemat baterai).");
+}
+
+// --- Speaker ---
+function tone(freq, ms) {
+  const c = audio();
+  const o = c.createOscillator();
+  const g = c.createGain();
+  g.gain.value = 0.5;
+  o.frequency.value = freq;
+  o.connect(g);
+  g.connect(c.destination);
+  o.start();
+  o.stop(c.currentTime + ms / 1000);
+}
+async function beep() {
+  try { tone(440, 1000); say("bunyi", "info", "Nada dibunyikan. Terdengar? Kalau tidak, naikkan volume MEDIA (bukan volume dering) lalu ulangi."); }
+  catch (e) { say("bunyi", "fail", "Gagal membunyikan nada: " + (e.name || e)); }
+}
+async function sweep() {
+  try {
+    say("bunyi", "info", "Nada rendah, sedang, tinggi. Dengarkan apakah ada suara pecah atau sember.");
+    for (const f of [250, 600, 1500, 3000]) { tone(f, 600); await sleep(750); }
+  } catch (e) { say("bunyi", "fail", "Gagal: " + (e.name || e)); }
+}
+
+// --- Mikrofon ---
+async function mic() {
+  say("mic", "info", "Meminta izin mikrofon…");
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+  } catch (e) {
+    return say("mic", "fail", "Mikrofon tidak bisa dibuka: " + (e.name || e) + ". Izinkan akses mikrofon untuk browser ini.");
+  }
+  const c = audio();
+  const an = c.createAnalyser();
+  an.fftSize = 1024;
+  c.createMediaStreamSource(stream).connect(an);
+  const buf = new Uint8Array(an.fftSize);
+  const bar = $("#meter i");
+  let peak = 0;
+  const t0 = Date.now();
+  while (Date.now() - t0 < 5000) {
+    an.getByteTimeDomainData(buf);
+    let m = 0;
+    for (const v of buf) m = Math.max(m, Math.abs(v - 128));
+    const lvl = m / 128;
+    peak = Math.max(peak, lvl);
+    bar.style.width = Math.min(100, lvl * 200) + "%";
+    say("mic", "info", "Bicara atau tepuk tangan dekat mikrofon… " + Math.ceil((5000 - (Date.now() - t0)) / 1000) + " dtk");
+    await sleep(60);
+  }
+  stream.getTracks().forEach((t) => t.stop());
+  bar.style.width = "0";
+  if (peak > 0.05) say("mic", "pass", "Mikrofon menangkap suara (puncak " + Math.round(peak * 100) + "%).");
+  else say("mic", "warn", "Tidak ada suara terdeteksi. Ulangi dengan bicara lebih dekat. Kalau tetap kosong, curiga mikrofon atau lubang mikrofon tersumbat.");
+}
+
+// --- USB / pengisian ---
+async function charge() {
+  if (!navigator.getBattery) return say("usb", "warn", "Browser ini tidak menyediakan status baterai. Pakai uji USB di Nexa (komputer).");
+  const b = await navigator.getBattery();
+  const show = () => say("usb", b.charging ? "pass" : "warn",
+    "Baterai " + Math.round(b.level * 100) + "% · " + (b.charging ? "sedang mengisi daya" : "tidak mengisi daya") +
+    "\nColok lalu cabut kabel: status di sini harus berubah sendiri.");
+  show();
+  b.onchargingchange = show;
+  b.onlevelchange = show;
+}
+
+// --- Bluetooth ---
+async function bt() {
+  if (!navigator.bluetooth) return say("bt", "warn", "Browser ini tidak mendukung Web Bluetooth (butuh Chrome Android). Uji lewat Pengaturan Bluetooth.");
+  try {
+    if (navigator.bluetooth.getAvailability && !(await navigator.bluetooth.getAvailability())) {
+      return say("bt", "warn", "Adapter Bluetooth tidak tersedia atau mati. Nyalakan Bluetooth lalu ulangi.");
+    }
+  } catch (e) { /* lanjut ke pemindaian */ }
+  try {
+    const d = await navigator.bluetooth.requestDevice({ acceptAllDevices: true });
+    say("bt", "pass", "Bluetooth memindai dan menemukan: " + (d.name || d.id));
+  } catch (e) {
+    if (e.name === "NotFoundError") say("bt", "warn", "Pemindaian selesai tanpa perangkat dipilih. Kalau ada perangkat Bluetooth menyala di dekat HP tapi tidak muncul di daftar, curiga modul atau antena Bluetooth.");
+    else say("bt", "fail", "Gagal: " + (e.name || e));
+  }
+}
+
+// --- GPS ---
+function gps() {
+  if (!navigator.geolocation) return say("gps", "fail", "Browser ini tidak mendukung lokasi.");
+  say("gps", "info", "Mencari lokasi… Di luar ruangan lebih cepat (maksimal 40 detik).");
+  const t0 = Date.now();
+  navigator.geolocation.getCurrentPosition(
+    (p) => {
+      const acc = Math.round(p.coords.accuracy);
+      say("gps", acc <= 50 ? "pass" : "warn",
+        "Lokasi didapat dalam " + Math.round((Date.now() - t0) / 1000) + " dtk\nAkurasi ±" + acc + " m" +
+        (acc > 100 ? " (besar: kemungkinan hanya dari jaringan, bukan satelit GPS)" : "") +
+        "\n" + p.coords.latitude.toFixed(5) + ", " + p.coords.longitude.toFixed(5));
+    },
+    (e) => say("gps", "warn", e.code === 1 ? "Izin lokasi ditolak. Izinkan lokasi untuk browser ini."
+      : e.code === 3 ? "Waktu habis, tidak mendapat posisi. Coba di luar ruangan."
+      : "Lokasi tidak tersedia: " + e.message),
+    { enableHighAccuracy: true, timeout: 40000, maximumAge: 0 },
+  );
+}
+
+// --- NFC ---
+async function nfc() {
+  if (!("NDEFReader" in window)) return say("nfc", "warn", "Browser ini tidak mendukung NFC web (butuh Chrome Android). Kalau HP punya NFC, uji lewat Pengaturan NFC.");
+  const ctl = new AbortController();
+  let got = false;
+  try {
+    const r = new NDEFReader();
+    await r.scan({ signal: ctl.signal });
+    say("nfc", "info", "NFC aktif. Dekatkan kartu atau tag NFC ke bagian belakang HP (30 detik)…");
+    r.onreading = (e) => { got = true; say("nfc", "pass", "Tag terbaca" + (e.serialNumber ? " (serial " + e.serialNumber + ")" : "") + ". NFC berfungsi."); };
+    r.onreadingerror = () => { got = true; say("nfc", "warn", "Ada tag terdeteksi tapi tidak bisa dibaca. Antena NFC merespons."); };
+    setTimeout(() => { if (!got) { ctl.abort(); say("nfc", "warn", "Tidak ada tag terbaca dalam 30 detik. Coba tag lain atau geser posisi (antena NFC biasanya di dekat kamera belakang)."); } }, 30000);
+  } catch (e) {
+    if (e.name === "NotSupportedError") say("nfc", "warn", "NFC mati atau HP tidak punya NFC. Nyalakan NFC di Pengaturan lalu ulangi.");
+    else if (e.name === "NotAllowedError") say("nfc", "warn", "Izin NFC ditolak. Izinkan lalu ulangi.");
+    else say("nfc", "fail", "Gagal: " + (e.name || e));
+  }
+}
+
+const TESTS = [
+  { id: "getar", title: "Getaran", hint: "Pegang HP dan rasakan getarannya.", actions: [["Getar 1 detik", () => vib(1000)], ["Pola 3×", () => vib([350, 300, 350, 300, 350])]] },
+  { id: "bunyi", title: "Suara speaker", hint: "Naikkan volume media dulu. Dengarkan nada dari speaker.", actions: [["Bunyikan nada", beep], ["Rendah ke tinggi", sweep]] },
+  { id: "mic", title: "Mikrofon", hint: "Izinkan mikrofon, lalu bicara atau tepuk tangan dekat HP.", actions: [["Mulai uji mikrofon", mic]], extra: '<div class="meter" id="meter"><i></i></div>' },
+  { id: "usb", title: "Port USB / pengisian", hint: "Colok dan cabut kabel charger, perhatikan status berubah.", actions: [["Baca status daya", charge]] },
+  { id: "bt", title: "Bluetooth", hint: "Nyalakan Bluetooth. Daftar perangkat di sekitar harus muncul.", actions: [["Pindai Bluetooth", bt]] },
+  { id: "gps", title: "GPS", hint: "Nyalakan lokasi. Lebih cepat di luar ruangan.", actions: [["Cari lokasi", gps]] },
+  { id: "nfc", title: "NFC", hint: "Nyalakan NFC. Siapkan kartu atau tag NFC.", actions: [["Mulai baca NFC", nfc]] },
+];
+
+$("#app").innerHTML = TESTS.map((t) => `
+  <section class="card" id="c-${t.id}">
+    <h2>${t.title}</h2>
+    <p class="hint">${t.hint}</p>
+    <div class="row">${t.actions.map((a, i) => `<button data-t="${t.id}" data-i="${i}">${a[0]}</button>`).join("")}</div>
+    ${t.extra || ""}
+    <div class="out info" id="o-${t.id}"></div>
+  </section>`).join("");
+
+$("#app").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-t]");
+  if (!b) return;
+  const t = TESTS.find((x) => x.id === b.dataset.t);
+  try { Promise.resolve(t.actions[Number(b.dataset.i)][1]()).catch((err) => say(t.id, "fail", "Gagal: " + (err.message || err))); }
+  catch (err) { say(t.id, "fail", "Gagal: " + (err.message || err)); }
+});
+
+const target = $("#c-" + location.hash.slice(1));
+if (target) target.scrollIntoView();
+</script></body></html>
