@@ -1,18 +1,25 @@
 :root{--bench:#e2e6e0;--panel:#f3f5f1;--ink:#17231f;--mute:#5b6a64;--line:#c3cbc4;--mask:#0f4c4a;--on-mask:#eaf3f0;--amber:#e9b300;--ok:#1d7a5a;--warn:#8f6400;--bad:#b83224;color-scheme:light dark}
 @media (prefers-color-scheme:dark){:root{--bench:#121c1b;--panel:#1a2625;--ink:#e4ece8;--mute:#92a39c;--line:#2e3f3c;--mask:#1b5f5a;--ok:#5cc9a0;--warn:#e9b300;--bad:#ff8a78}}
 *{box-sizing:border-box}
-html,body{margin:0;overflow-x:hidden}
+/* overflow-x hanya di html (diteruskan ke viewport). Kalau body juga overflow-x:hidden, body jadi
+   kontainer scroll sendiri dan position:sticky (menu samping, bilah atas) tidak pernah menempel. */
+html,body{margin:0}
+html{overflow-x:hidden}
+body{overflow-x:clip}
 body{background:var(--bench);color:var(--ink);font:400 16px/1.5 Archivo,"Segoe UI",system-ui,sans-serif}
 button,input{font:inherit;color:inherit}
 :focus-visible{outline:3px solid var(--amber);outline-offset:2px}
-.app{display:grid;grid-template-columns:208px minmax(0,1fr);min-height:100vh;padding-top:env(safe-area-inset-top,0px)}
+.app{display:grid;grid-template-columns:244px minmax(0,1fr);min-height:100vh;padding-top:env(safe-area-inset-top,0px)}
 aside{border-right:1px solid var(--line);padding:22px 0}
 .brand{padding:0 20px 20px;font-weight:800;font-stretch:112%;font-size:1.1rem;line-height:1.15}
 .brand small{display:block;font-weight:500;font-stretch:100%;color:var(--mute);font-size:.8rem}
 #nav{display:flex;flex-direction:column}
-#nav button{background:none;border:0;border-left:4px solid transparent;border-radius:0;text-align:left;padding:9px 20px;color:var(--mute);cursor:pointer}
+/* Padding, border, warna, dan latar tombol menu diatur polish.css dan luxe.css (chip ikon di kiri).
+   Jangan set padding/border/color di sini: style.css dimuat SETELAH keduanya, jadi aturan di sini
+   menang dan membuat chip ikon menimpa huruf pertama label menu. */
+#nav button{background:none;text-align:left;cursor:pointer}
 #nav button:hover{color:var(--ink)}
-#nav button.active{color:var(--ink);font-weight:700;border-left-color:var(--amber);background:var(--panel)}
+#nav button.active{font-weight:700}
 .col{min-width:0;padding:22px clamp(16px,3vw,36px) 40px}
 .top{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-bottom:18px}
 .mbrand,.tiles,.bnav{display:none}
