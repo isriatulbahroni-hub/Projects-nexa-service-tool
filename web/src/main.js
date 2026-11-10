@@ -83,6 +83,15 @@ async function sh(cmd) {
     return "";
   }
 }
+// Seperti sh(), tapi MELEMPAR error kalau koneksi/pengiriman perintah gagal (sh() menelannya
+// dan mengembalikan ""). Dipakai pemeriksaan yang tidak boleh menampilkan PASS palsu.
+async function shx(cmd) {
+  if (!adb) throw new Error("Device belum terhubung.");
+  return (await adb.subprocess.noneProtocol.spawn(cmd).wait().toString()).trim();
+}
+// Kutip tunggal: aman untuk karakter apa pun ($, `, ;, spasi, dll.) di sh.
+const sq = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
+const PKG_NAME_RE = /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$/;
 async function shBytes(cmd) {
   return adb.subprocess.noneProtocol.spawn(cmd).wait();
 }
@@ -564,7 +573,7 @@ const PAGE_RENDER = {
     $("#q").oninput = draw;
     $("#tbl").onclick = async (e) => {
       const pkg = e.target.dataset?.pkg;
-      if (!pkg) return;
+      if (!pkg || !PKG_NAME_RE.test(pkg)) return;
       const d = $("#detail");
       d.style.display = "block";
       d.textContent = "Memuat…";
@@ -576,7 +585,8 @@ const PAGE_RENDER = {
 
   async files(view, path = "/sdcard") {
     // /sdcard adalah symlink; tanpa garis miring di akhir, ls hanya menampilkan symlink-nya.
-    const out = await sh(`ls -la "${path.replace(/\/$/, "")}/"`);
+    // Nama folder berasal dari HP pelanggan: kutip tunggal supaya $(...) atau backtick di nama folder tidak dieksekusi.
+    const out = await sh(`ls -la ${sq(path.replace(/\/$/, "") + "/")}`);
     const entries = out.split("\n").slice(1).map((l) => {
       const p = l.trim().split(/\s+/);
       if (p.length < 8) return null;
@@ -645,6 +655,31 @@ async function runHardwareTests() {
   const tbl = $("#res");
   if (!tbl) return;
   tbl.innerHTML = `<tr><th>Pemeriksaan</th><th>Status</th><th>Nilai</th><th>Detail</th></tr>`;
+  try {
+    await runHardwareChecks(tbl);
+  } catch (e) {
+    tbl.insertAdjacentHTML("beforeend",
+      `<tr><td>Pemeriksaan terhenti</td><td class="fail">FAIL</td><td>-</td><td class="muted">${esc(e?.message || e)}. Hubungkan HP lagi lalu jalankan ulang.</td></tr>`);
+  }
+}
+
+async function runHardwareChecks(tbl) {
+  // Di sini sh = shx: koneksi putus harus tampil sebagai kegagalan, bukan hasil "kosong = baik".
+  const sh = shx;
+  const prop = (k) => shx(`getprop ${k}`);
+  const parseStorage = async () => {
+    const out = await shx("df -k /data");
+    const line = out.split("\n").filter(Boolean).pop() || "";
+    const p = line.trim().split(/\s+/);
+    const total = Number(p[1]) * 1024, used = Number(p[2]) * 1024;
+    return total ? { total, used, percent: Math.round((used / total) * 100) } : null;
+  };
+  const parseMemory = async () => {
+    const raw = await shx("cat /proc/meminfo");
+    const kb = (k) => Number((raw.match(new RegExp(`^${k}:\\s+(\\d+)`, "m")) || [])[1] || 0);
+    const total = kb("MemTotal") * 1024, avail = kb("MemAvailable") * 1024;
+    return total ? { total, avail, percentFree: (avail / total) * 100 } : null;
+  };
   const features = await sh("pm list features");
   const hasFeature = (f) => features.includes(f);
   const add = (name, status, value, detail) => {
@@ -654,7 +689,9 @@ async function runHardwareTests() {
 
   const bat = parseBattery(await sh("dumpsys battery"));
   if (bat.healthCode === 2) add("Battery health", "PASS", bat.health, "Kondisi baterai baik.");
-  else if (bat.healthCode) add("Battery health", bat.healthCode === 1 ? "INFO" : "FAIL", bat.health, "Indikasi masalah fisik baterai.");
+  else if (bat.healthCode === 1) add("Battery health", "INFO", bat.health, "Status tidak diketahui.");
+  else if (bat.healthCode === 7) add("Battery health", "WARN", bat.health, "Baterai terlalu dingin; ukur ulang setelah suhunya normal.");
+  else if (bat.healthCode) add("Battery health", "FAIL", bat.health, "Indikasi masalah fisik baterai.");
   else add("Battery health", "INFO", "-", "Data tidak tersedia.");
 
   if (bat.temp != null) {
@@ -695,9 +732,14 @@ async function runHardwareTests() {
   add("Modem / SIM", /READY/.test(sim) ? "PASS" : sim ? "WARN" : "INFO", `${sim || "-"} ${op ? "· " + op : ""}`, "Status registrasi SIM/jaringan.");
 
   const log = await sh("logcat -d -t 3000");
-  const crashes = (log.match(/FATAL EXCEPTION/g) || []).length;
-  const anrs = (log.match(/ANR in /g) || []).length;
-  add("Stabilitas software", crashes + anrs >= 10 ? "WARN" : "PASS", `${crashes} crash, ${anrs} ANR`, "Dari 3000 baris logcat terakhir.");
+  if (!log) {
+    // Log kosong/tidak terbaca BUKAN berarti stabil.
+    add("Stabilitas software", "INFO", "-", "Logcat tidak terbaca (HP tidak memberi izin atau log kosong); stabilitas tidak bisa dinilai.");
+  } else {
+    const crashes = (log.match(/FATAL EXCEPTION/g) || []).length;
+    const anrs = (log.match(/ANR in /g) || []).length;
+    add("Stabilitas software", crashes + anrs >= 10 ? "WARN" : "PASS", `${crashes} crash, ${anrs} ANR`, "Dari 3000 baris logcat terakhir.");
+  }
 }
 
 // ---------------------------------------------------------------
