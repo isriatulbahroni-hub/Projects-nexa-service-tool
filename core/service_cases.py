@@ -5,14 +5,16 @@ cases to the device serial/IMEI when available.
 """
 from __future__ import annotations
 
+import math
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from .config import PROJECT_ROOT
+from .config import DATA_DIR
 
-DB_PATH = PROJECT_ROOT / "data" / "nexa_service.db"
+DB_PATH = DATA_DIR / "nexa_service.db"
 
 STATUSES = ("Received", "Diagnosing", "Repairing", "Testing", "Completed", "Cancelled")
 PAYMENT_STATUSES = ("Belum Bayar", "DP", "Lunas")
@@ -53,6 +55,9 @@ def _connection() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
+    # SQLite mematikan foreign key secara bawaan; tanpa ini ON DELETE CASCADE
+    # pada tabel event/foto tidak pernah berjalan.
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
@@ -127,12 +132,16 @@ def _case(row: sqlite3.Row) -> ServiceCase:
 
 
 def _new_case_number(conn: sqlite3.Connection) -> str:
+    """Nomor berikutnya = nomor tertinggi hari ini + 1 (bukan COUNT+1, yang
+    bisa bentrok kalau ada case yang dihapus)."""
     stamp = datetime.now().strftime("%Y%m%d")
+    prefix = f"NS-{stamp}-"
     row = conn.execute(
-        "SELECT COUNT(*) AS n FROM service_cases WHERE case_number LIKE ?",
-        (f"NS-{stamp}-%",),
+        "SELECT MAX(CAST(SUBSTR(case_number, ?) AS INTEGER)) AS n FROM service_cases WHERE case_number LIKE ?",
+        (len(prefix) + 1, f"{prefix}%"),
     ).fetchone()
-    return f"NS-{stamp}-{int(row['n']) + 1:04d}"
+    last = int(row["n"]) if row["n"] is not None else 0
+    return f"{prefix}{last + 1:04d}"
 
 
 def create_case(
@@ -156,22 +165,33 @@ def create_case(
     if estimated_cost < 0:
         raise ValueError("estimated_cost cannot be negative")
 
+    if not math.isfinite(float(estimated_cost)):
+        raise ValueError("estimated_cost must be a finite number")
+
     init_service_cases()
     now = datetime.now().isoformat(timespec="seconds")
     conn = _connection()
     try:
-        case_number = _new_case_number(conn)
-        cur = conn.execute(
-            """INSERT INTO service_cases
-            (case_number, customer_name, customer_phone, device_serial, imei,
-             manufacturer, model, complaint, technician, status, estimated_cost, notes,
-             created_at, updated_at, payment_status, paid_amount, estimated_completion)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Received', ?, ?, ?, ?, 'Belum Bayar', 0, ?)""",
-            (case_number, customer_name.strip(), customer_phone.strip(),
-             device_serial.strip(), imei.strip(), manufacturer.strip(),
-             model.strip(), complaint.strip(), technician.strip(), float(estimated_cost),
-             notes.strip(), now, now, estimated_completion.strip()),
-        )
+        # Dua proses/thread bisa mengambil nomor yang sama; kolom UNIQUE menolak
+        # yang kedua, jadi ulangi dengan nomor baru.
+        for attempt in range(5):
+            case_number = _new_case_number(conn)
+            try:
+                cur = conn.execute(
+                    """INSERT INTO service_cases
+                    (case_number, customer_name, customer_phone, device_serial, imei,
+                     manufacturer, model, complaint, technician, status, estimated_cost, notes,
+                     created_at, updated_at, payment_status, paid_amount, estimated_completion)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Received', ?, ?, ?, ?, 'Belum Bayar', 0, ?)""",
+                    (case_number, customer_name.strip(), customer_phone.strip(),
+                     device_serial.strip(), imei.strip(), manufacturer.strip(),
+                     model.strip(), complaint.strip(), technician.strip(), float(estimated_cost),
+                     notes.strip(), now, now, estimated_completion.strip()),
+                )
+                break
+            except sqlite3.IntegrityError:
+                if attempt == 4:
+                    raise
         case_id = cur.lastrowid
         conn.execute(
             "INSERT INTO service_case_events (case_id, event_type, new_value, note, created_at) VALUES (?, 'created', 'Received', ?, ?)",
@@ -287,8 +307,15 @@ def get_timeline(case_id: int) -> list[dict[str, object]]:
 def update_payment(case_id: int, payment_status: str, paid_amount: float, note: str = "") -> ServiceCase:
     if payment_status not in PAYMENT_STATUSES:
         raise ValueError(f"invalid payment_status: {payment_status}")
+    if not math.isfinite(paid_amount):
+        raise ValueError("paid_amount harus berupa angka yang valid")
     if paid_amount < 0:
         raise ValueError("paid_amount cannot be negative")
+    # Status dan jumlah harus konsisten, kalau tidak ringkasan pendapatan salah.
+    if payment_status == "Belum Bayar" and paid_amount != 0:
+        raise ValueError("Status 'Belum Bayar' harus dengan jumlah dibayar 0.")
+    if payment_status in ("DP", "Lunas") and paid_amount <= 0:
+        raise ValueError(f"Status '{payment_status}' harus dengan jumlah dibayar lebih dari 0.")
 
     init_service_cases()
     now = datetime.now().isoformat(timespec="seconds")
@@ -447,6 +474,18 @@ def delete_photo(photo_id: int) -> None:
         conn.close()
 
 
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _validate_date_range(start_date: str, end_date: str) -> None:
+    for label, value in (("tanggal mulai", start_date), ("tanggal akhir", end_date)):
+        if not _DATE_RE.match(value or ""):
+            raise ValueError(f"Format {label} harus YYYY-MM-DD: {value!r}")
+        datetime.strptime(value, "%Y-%m-%d")  # tolak 2026-02-31 dll.
+    if start_date > end_date:
+        raise ValueError("Tanggal mulai tidak boleh setelah tanggal akhir.")
+
+
 @dataclass(frozen=True)
 class BusinessSummary:
     period_label: str
@@ -465,15 +504,27 @@ def get_business_summary(start_date: str, end_date: str) -> BusinessSummary:
     dipakai halaman Laporan supaya pemilik konter bisa lihat jumlah case,
     pendapatan, dan sisa tagihan tanpa harus hitung manual dari daftar
     case satu-satu."""
+    _validate_date_range(start_date, end_date)
     init_service_cases()
     conn = _connection()
     try:
         rows = conn.execute(
-            """SELECT status, technician, estimated_cost, paid_amount, created_at, updated_at
+            """SELECT id, status, technician, estimated_cost, paid_amount, created_at, updated_at
             FROM service_cases
             WHERE date(created_at) >= date(?) AND date(created_at) <= date(?)""",
             (start_date, end_date),
         ).fetchall()
+        # Waktu selesai = kejadian pertama status 'Completed'. updated_at tidak
+        # bisa dipakai: ikut berubah tiap catatan/pembayaran diedit sesudah selesai.
+        completed_at = {
+            r["case_id"]: r["first_done"]
+            for r in conn.execute(
+                """SELECT case_id, MIN(created_at) AS first_done
+                FROM service_case_events
+                WHERE event_type = 'status' AND new_value = 'Completed'
+                GROUP BY case_id"""
+            ).fetchall()
+        }
 
         total_cases = len(rows)
         completed = sum(1 for r in rows if r["status"] == "Completed")
@@ -508,8 +559,8 @@ def get_business_summary(start_date: str, end_date: str) -> BusinessSummary:
                 continue
             try:
                 created = datetime.fromisoformat(r["created_at"][:19])
-                updated = datetime.fromisoformat(r["updated_at"][:19])
-                turnaround_hours.append((updated - created).total_seconds() / 3600)
+                finished = datetime.fromisoformat((completed_at.get(r["id"]) or r["updated_at"])[:19])
+                turnaround_hours.append((finished - created).total_seconds() / 3600)
             except ValueError:
                 continue
 
@@ -532,12 +583,26 @@ def get_business_summary(start_date: str, end_date: str) -> BusinessSummary:
         conn.close()
 
 
+_FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r")
+_PLAIN_NUMBER_RE = re.compile(r"^[+-]?\d[\d\s().-]*$")
+
+
+def _csv_safe(value):
+    """Cegah CSV/formula injection: sel teks yang diawali = + - @ dieksekusi
+    sebagai rumus oleh Excel/Sheets. Nomor telepon biasa (+62 812-...) dibiarkan."""
+    if isinstance(value, str) and value.startswith(_FORMULA_TRIGGERS) and not _PLAIN_NUMBER_RE.match(value):
+        return "'" + value
+    return value
+
+
 def export_cases_csv(output_path, start_date: str = "", end_date: str = "") -> Path:
     """Export semua case (opsional difilter rentang tanggal) ke CSV untuk
     dibuka di Excel/Google Sheets - kebutuhan pembukuan/laporan pajak yang
     sebelumnya cuma bisa dilihat manual di aplikasi atau per-case PDF."""
     import csv as csv_module
 
+    if start_date and end_date:
+        _validate_date_range(start_date, end_date)
     init_service_cases()
     conn = _connection()
     try:
@@ -565,6 +630,6 @@ def export_cases_csv(output_path, start_date: str = "", end_date: str = "") -> P
         writer = csv_module.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
-            writer.writerow({k: row[k] for k in fieldnames})
+            writer.writerow({k: _csv_safe(row[k]) for k in fieldnames})
 
     return output_path
