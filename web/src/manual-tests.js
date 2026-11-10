@@ -3,7 +3,18 @@
 // layar, dan tombol fisik harus dirasakan atau ditekan langsung oleh teknisi.
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const BAD = /unknown|usage|error|exception|not found|inaccessible|no such|permission|denied|invalid|unsupported/i;
+// Pola pesan galat dari perintah shell Android. "can't find service" muncul di HP yang tidak punya
+// layanan itu (mis. vibrator_manager di Android 11 ke bawah) dan dulu lolos sebagai "berhasil".
+const BAD = /unknown|usage|error|exception|not found|inaccessible|no such|permission|denied|invalid|unsupported|can't find|cannot find|not exist|aborted|no service/i;
+
+// Semua panggilan ke HP diberi batas waktu supaya satu perintah macet tidak mengunci semua tombol.
+function withTimeout(promise, ms, message) {
+  let t;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => { t = setTimeout(() => reject(new Error(message)), ms); }),
+  ]).finally(() => clearTimeout(t));
+}
 
 const TESTS = [
   {
@@ -82,8 +93,20 @@ async function vibratorInfo(sh) {
 // ---------------------------------------------------------------
 // Render
 // ---------------------------------------------------------------
-export function renderManualTests(root, { sh, esc }) {
+export function renderManualTests(root, { sh: rawSh, esc }) {
   if (!root) return;
+
+  // sh bawaan main.js menelan semua galat dan mengembalikan "" (sama dengan "berhasil tanpa output").
+  // Bungkus dengan batas waktu, lalu cek dulu bahwa HP benar-benar menjawab sebelum tiap uji.
+  const sh = (cmd, ms = 8000) =>
+    withTimeout(Promise.resolve(rawSh(cmd)), ms, `HP tidak merespons (${String(cmd).split(" ")[0]}).`);
+  const ensureLink = async () => {
+    const pong = String(await sh("echo nexa_ok", 5000));
+    if (!pong.includes("nexa_ok")) {
+      throw new Error("Koneksi ADB ke HP tidak merespons. Hubungkan ulang HP, lalu coba lagi.");
+    }
+  };
+
   root.innerHTML = `
     <div class="card"><h2>Uji manual (interaktif)</h2>
       <p class="muted">Pemeriksaan di atas hanya membaca data. Komponen di bawah harus dirasakan atau ditekan langsung. Setelah tes jalan, tekan <b>Normal</b> atau <b>Bermasalah</b> sesuai yang kamu rasakan.</p>
@@ -155,17 +178,29 @@ export function renderManualTests(root, { sh, esc }) {
       setStatus("bri", "INFO", "Mengubah kecerahan…");
       const oldVal = (await sh("settings get system screen_brightness")).trim();
       const oldMode = (await sh("settings get system screen_brightness_mode")).trim();
+      if (!/^\d+$/.test(oldVal)) {
+        setStatus("bri", "WARN", "HP tidak mengizinkan membaca/mengubah kecerahan lewat ADB. Uji kecerahan manual lewat Mirror.");
+        return;
+      }
+      let putOut = "";
       try {
-        await sh("settings put system screen_brightness_mode 0");
-        await sh("settings put system screen_brightness 255");
+        putOut += await sh("settings put system screen_brightness_mode 0");
+        putOut += await sh("settings put system screen_brightness 255");
         note("bri", "Terang penuh…");
         await sleep(1500);
-        await sh("settings put system screen_brightness 15");
+        putOut += await sh("settings put system screen_brightness 15");
         note("bri", "Redup…");
         await sleep(1500);
       } finally {
-        if (/^\d+$/.test(oldVal)) await sh(`settings put system screen_brightness ${oldVal}`);
-        if (/^\d+$/.test(oldMode)) await sh(`settings put system screen_brightness_mode ${oldMode}`);
+        // kembalikan pengaturan semula walau ada galat di tengah jalan
+        try {
+          await sh(`settings put system screen_brightness ${oldVal}`);
+          if (/^\d+$/.test(oldMode)) await sh(`settings put system screen_brightness_mode ${oldMode}`);
+        } catch {}
+      }
+      if (BAD.test(putOut)) {
+        setStatus("bri", "WARN", "HP menolak perubahan kecerahan (izin WRITE_SETTINGS). Uji kecerahan manual lewat Mirror.");
+        return;
       }
       row("bri").querySelector(".mt-st").textContent = "Menunggu penilaian";
       note("bri", "Pengaturan dikembalikan. Layar berubah terang lalu redup dengan mulus?");
@@ -182,11 +217,16 @@ export function renderManualTests(root, { sh, esc }) {
       let unsupported = false;
       for (const [label, re] of keys) {
         setStatus("key", "INFO", `Tekan ${label} sekarang (8 detik)…`);
-        const out = await sh("timeout 8 getevent -lq");
-        if (/not found|inaccessible|permission denied/i.test(out)) { unsupported = true; break; }
+        const out = await sh("timeout 8 getevent -lq", 15000);
+        if (/not found|inaccessible|permission denied|can't find|unknown option|usage/i.test(out)) { unsupported = true; break; }
         results.push([label, re.test(out)]);
       }
       if (unsupported) { setStatus("key", "WARN", "HP ini tidak mengizinkan getevent lewat ADB. Uji tombol manual lewat Mirror."); return; }
+      if (results.every(([, ok]) => !ok)) {
+        // Tidak satu tombol pun terbaca: bisa tombol rusak, bisa juga HP tidak mengirim event lewat ADB.
+        setStatus("key", "WARN", "Tidak ada tombol yang terbaca. Pastikan tombol benar-benar ditekan; kalau tetap kosong, HP ini mungkin tidak mengirim event tombol lewat ADB. Cek manual lewat Mirror.");
+        return;
+      }
       const failed = results.filter(([, ok]) => !ok).map(([l]) => l);
       setStatus("key", failed.length ? "FAIL" : "PASS",
         failed.length ? `Tidak terdeteksi: ${failed.join(", ")}.` : "Semua tombol terdeteksi.");
@@ -195,6 +235,10 @@ export function renderManualTests(root, { sh, esc }) {
     async usb() {
       setStatus("usb", "INFO", "Membaca…");
       const raw = await sh("dumpsys battery");
+      if (!raw || !/level:/.test(raw)) {
+        setStatus("usb", "WARN", "Data baterai tidak terbaca dari HP. Hubungkan ulang lalu coba lagi.");
+        return;
+      }
       const usb = /USB powered: true/.test(raw);
       const ac = /AC powered: true/.test(raw);
       const wireless = /Wireless powered: true/.test(raw);
@@ -208,8 +252,14 @@ export function renderManualTests(root, { sh, esc }) {
     if (!btn || busy) return;
     if (btn.id === "vibinfoBtn") {
       lock(true);
-      try { root.querySelector("#vibinfo").textContent = "Membaca…"; root.querySelector("#vibinfo").textContent = await vibratorInfo(sh); }
-      finally { lock(false); }
+      const pre = root.querySelector("#vibinfo");
+      try {
+        pre.textContent = "Membaca…";
+        await ensureLink();
+        pre.textContent = await vibratorInfo(sh);
+      } catch (err) {
+        pre.textContent = `Gagal: ${err?.message || err}`;
+      } finally { lock(false); }
       return;
     }
     const id = btn.dataset.t;
@@ -224,6 +274,8 @@ export function renderManualTests(root, { sh, esc }) {
     lock(true);
     showConfirm(id, false);
     try {
+      setStatus(id, "INFO", "Memeriksa koneksi ke HP…");
+      await ensureLink();
       await RUN[id](action);
     } catch (err) {
       setStatus(id, "WARN", `Gagal: ${err?.message || err}`);
