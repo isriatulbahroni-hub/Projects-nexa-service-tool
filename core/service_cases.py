@@ -327,6 +327,13 @@ def update_payment(case_id: int, payment_status: str, paid_amount: float, note: 
         if row is None:
             raise KeyError(f"service case {case_id} not found")
 
+        est = conn.execute(
+            "SELECT estimated_cost FROM service_cases WHERE id = ?", (case_id,)
+        ).fetchone()["estimated_cost"]
+        if payment_status == "Lunas" and est > 0 and paid_amount < est:
+            gap = f"Lunas dengan selisih Rp{est - paid_amount:,.0f} dari estimasi"
+            note = f"{note.strip()}; {gap}" if note.strip() else gap
+
         conn.execute(
             "UPDATE service_cases SET payment_status = ?, paid_amount = ?, updated_at = ? WHERE id = ?",
             (payment_status, float(paid_amount), now, case_id),
@@ -344,6 +351,39 @@ def update_payment(case_id: int, payment_status: str, paid_amount: float, note: 
             ),
         )
         conn.commit()
+        return get_case(case_id)
+    finally:
+        conn.close()
+
+
+def update_estimated_cost(case_id: int, estimated_cost: float, note: str = "") -> ServiceCase:
+    """Ubah estimasi biaya (harga final sering berbeda dari estimasi awal).
+    Perubahan dicatat di linimasa."""
+    if not math.isfinite(float(estimated_cost)):
+        raise ValueError("estimated_cost must be a finite number")
+    if estimated_cost < 0:
+        raise ValueError("estimated_cost cannot be negative")
+
+    init_service_cases()
+    now = datetime.now().isoformat(timespec="seconds")
+    conn = _connection()
+    try:
+        row = conn.execute("SELECT estimated_cost FROM service_cases WHERE id = ?", (case_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"service case {case_id} not found")
+        old_cost = row["estimated_cost"]
+        if float(estimated_cost) != old_cost:
+            conn.execute(
+                "UPDATE service_cases SET estimated_cost = ?, updated_at = ? WHERE id = ?",
+                (float(estimated_cost), now, case_id),
+            )
+            conn.execute(
+                "INSERT INTO service_case_events (case_id, event_type, old_value, new_value, note, created_at) "
+                "VALUES (?, 'edit', ?, ?, ?, ?)",
+                (case_id, f"Rp{old_cost:,.0f}", f"Rp{float(estimated_cost):,.0f}",
+                 note.strip() or "Estimasi biaya diubah", now),
+            )
+            conn.commit()
         return get_case(case_id)
     finally:
         conn.close()
@@ -465,13 +505,36 @@ def get_photos(case_id: int) -> list[CasePhoto]:
         conn.close()
 
 
+def _remove_managed_photo(photo_path: str) -> None:
+    """Hapus file foto dari disk HANYA kalau ada di folder case_photos milik
+    aplikasi (foto hasil salinan). File di lokasi lain tidak pernah disentuh."""
+    try:
+        target = Path(photo_path).resolve()
+        root = (DATA_DIR / "case_photos").resolve()
+        if target.is_file() and target.is_relative_to(root):
+            target.unlink()
+    except OSError:
+        pass
+
+
 def delete_photo(photo_id: int) -> None:
+    now = datetime.now().isoformat(timespec="seconds")
     conn = _connection()
     try:
+        row = conn.execute(
+            "SELECT case_id, photo_path FROM service_case_photos WHERE id = ?", (photo_id,)
+        ).fetchone()
+        if row is None:
+            return
         conn.execute("DELETE FROM service_case_photos WHERE id = ?", (photo_id,))
+        conn.execute(
+            "INSERT INTO service_case_events (case_id, event_type, note, created_at) VALUES (?, 'photo', ?, ?)",
+            (row["case_id"], f"Foto dihapus: {Path(row['photo_path']).name}", now),
+        )
         conn.commit()
     finally:
         conn.close()
+    _remove_managed_photo(row["photo_path"])
 
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -529,7 +592,9 @@ def get_business_summary(start_date: str, end_date: str) -> BusinessSummary:
         total_cases = len(rows)
         completed = sum(1 for r in rows if r["status"] == "Completed")
         cancelled = sum(1 for r in rows if r["status"] == "Cancelled")
-        total_revenue = sum(r["paid_amount"] for r in rows)
+        # Kasus Cancelled tidak dihitung (konsisten dengan sisa tagihan): DP yang
+        # dikembalikan bukan pendapatan.
+        total_revenue = sum(r["paid_amount"] for r in rows if r["status"] != "Cancelled")
         outstanding = sum(
             max(0.0, r["estimated_cost"] - r["paid_amount"])
             for r in rows if r["status"] not in ("Cancelled",)
@@ -551,7 +616,8 @@ def get_business_summary(start_date: str, end_date: str) -> BusinessSummary:
             entry["total_cases"] += 1
             if r["status"] == "Completed":
                 entry["completed_cases"] += 1
-            entry["revenue"] += r["paid_amount"]
+            if r["status"] != "Cancelled":
+                entry["revenue"] += r["paid_amount"]
 
         turnaround_hours = []
         for r in rows:
