@@ -16,19 +16,21 @@ function withTimeout(promise, ms, message) {
   ]).finally(() => clearTimeout(t));
 }
 
+const snippet = (s, n = 100) => String(s ?? "").trim().split("\n")[0].slice(0, n) || "(kosong)";
+
 const TESTS = [
   {
     id: "vib",
     name: "Getaran (motor vibrator)",
     hint: "Pegang HP lalu rasakan getarannya. Lepas casing kalau perlu.",
-    actions: [["short", "Getar 1 detik"], ["pattern", "Pola 3×"]],
+    actions: [["short", "Getar 1 detik"], ["pattern", "Pola 3×"], ["phone", "Uji di layar HP"]],
     confirm: true,
   },
   {
     id: "snd",
     name: "Suara (speaker)",
     hint: "Memunculkan notifikasi uji. Pastikan HP tidak mode senyap dan volume notifikasi tidak nol.",
-    actions: [["play", "Bunyikan"]],
+    actions: [["play", "Bunyikan"], ["phone", "Uji di layar HP"]],
     confirm: true,
   },
   {
@@ -49,10 +51,20 @@ const TESTS = [
     id: "usb",
     name: "Port USB / pengisian",
     hint: "Membaca status daya dari kabel yang sedang terpasang.",
-    actions: [["run", "Cek"]],
-    confirm: false,
+    actions: [["run", "Cek"], ["phone", "Uji di layar HP"]],
+    confirm: true,
   },
 ];
+
+// Hash kartu di halaman /hwtest.html yang dibuka di HP.
+const PHONE_HASH = { vib: "getar", snd: "bunyi", usb: "usb" };
+// Layar pengaturan Android yang dibuka lewat ADB (daftar tetap, bukan input bebas).
+const SETTINGS = {
+  bt: "android.settings.BLUETOOTH_SETTINGS",
+  nfc: "android.settings.NFC_SETTINGS",
+  loc: "android.settings.LOCATION_SOURCE_SETTINGS",
+  sec: "android.settings.SECURITY_SETTINGS",
+};
 
 const CLS = { PASS: "pass", WARN: "warn", FAIL: "fail", INFO: "info" };
 
@@ -73,14 +85,16 @@ async function vibrate(sh, ms) {
   const cmds = vibCommands(ms);
   // mulai dari perintah yang terakhir berhasil
   const order = [...cmds.slice(lastVibCmdIndex), ...cmds.slice(0, lastVibCmdIndex)];
+  const tried = [];
   for (const c of order) {
     const out = await sh(c);
     if (!BAD.test(out)) {
       lastVibCmdIndex = cmds.indexOf(c);
       return { ok: true, cmd: c };
     }
+    tried.push(snippet(out, 80));
   }
-  return { ok: false };
+  return { ok: false, tried };
 }
 
 async function vibratorInfo(sh) {
@@ -107,9 +121,18 @@ export function renderManualTests(root, { sh: rawSh, esc }) {
     }
   };
 
+  // Buka halaman uji (public/hwtest.html) di browser HP. Uji berjalan di HP itu sendiri,
+  // jadi tidak bergantung pada perintah shell yang dibatasi sebagian merek.
+  const openOnPhone = async (hash) => {
+    const url = `${location.origin}/hwtest.html${hash ? "#" + hash : ""}`;
+    await sh("input keyevent 224");
+    const r = await sh(`am start -a android.intent.action.VIEW -d "${url}"`);
+    return { url, failed: /error|exception|unable|not found/i.test(r), reply: snippet(r, 120) };
+  };
+
   root.innerHTML = `
     <div class="card"><h2>Uji manual (interaktif)</h2>
-      <p class="muted">Pemeriksaan di atas hanya membaca data. Komponen di bawah harus dirasakan atau ditekan langsung. Setelah tes jalan, tekan <b>Normal</b> atau <b>Bermasalah</b> sesuai yang kamu rasakan.</p>
+      <p class="muted">Pemeriksaan di atas hanya membaca data. Komponen di bawah harus dirasakan atau ditekan langsung. Setelah tes jalan, tekan <b>Normal</b> atau <b>Bermasalah</b> sesuai yang kamu rasakan. Kalau perintah lewat ADB tidak berefek di HP ini, pakai <b>Uji di layar HP</b>.</p>
       <table id="mtbl">
         <tr><th>Uji</th><th>Status</th><th>Aksi</th></tr>
         ${TESTS.map((t) => `
@@ -124,6 +147,26 @@ export function renderManualTests(root, { sh: rawSh, esc }) {
         </tr>`).join("")}
       </table>
       <details class="help" style="margin-top:10px"><summary><b>Detail teknis getaran</b></summary><pre id="vibinfo">Tekan tombol di bawah untuk membaca info vibrator.</pre><div class="row"><button id="vibinfoBtn">Baca info vibrator</button></div></details>
+    </div>
+    <div class="card" id="phcard"><h2>Uji langsung di HP</h2>
+      <p class="muted">Membuka halaman uji di browser HP pelanggan (HP harus menyala, tidak terkunci, dan punya internet). Ketuk tombol di layar HP; hasilnya tampil di HP. Aplikasi Chrome dianjurkan.</p>
+      <div class="row">
+        <button data-ph="">Buka semua uji di HP</button>
+        <button data-ph="mic">Mikrofon</button>
+        <button data-ph="bt">Bluetooth</button>
+        <button data-ph="gps">GPS</button>
+        <button data-ph="nfc">NFC</button>
+      </div>
+      <p class="muted" style="margin-top:12px">Pintasan pengaturan di HP, untuk memastikan komponen menyala dan dikenali:</p>
+      <div class="row">
+        <button data-set="bt">Pengaturan Bluetooth</button>
+        <button data-set="nfc">Pengaturan NFC</button>
+        <button data-set="loc">Pengaturan Lokasi</button>
+        <button data-set="sec">Keamanan (sidik jari)</button>
+      </div>
+      <p class="muted" style="margin-top:12px"><b>Uji sidik jari:</b> tekan <b>Matikan layar</b>, lalu tempelkan jari yang sudah terdaftar ke sensor. Layar harus menyala dan terbuka. Perlu ada sidik jari terdaftar di HP.</p>
+      <div class="row"><button data-sleep="1">Matikan layar</button></div>
+      <div class="muted" id="phout" style="margin-top:10px"></div>
     </div>`;
 
   const row = (id) => root.querySelector(`tr[data-t="${id}"]`);
@@ -149,16 +192,17 @@ export function renderManualTests(root, { sh: rawSh, esc }) {
       setStatus("vib", "INFO", "Getar dikirim…");
       if (a === "short") {
         const r = await vibrate(sh, 1000);
-        if (!r.ok) { setStatus("vib", "WARN", "Perintah getar ditolak HP ini. Lihat Detail teknis getaran."); return; }
-        note("vib", "Perintah getar terkirim. Terasa?");
+        if (!r.ok) { setStatus("vib", "WARN", `Perintah getar ditolak HP ini (jawaban HP: ${r.tried.join(" | ")}). Pakai Uji di layar HP.`); return; }
+        note("vib", "Perintah getar terkirim. Terasa? Kalau tidak terasa, coba Uji di layar HP.");
       } else {
-        let ok = true;
-        for (let i = 0; i < 3 && ok; i++) {
-          ok = (await vibrate(sh, 350)).ok;
+        let r;
+        for (let i = 0; i < 3; i++) {
+          r = await vibrate(sh, 350);
+          if (!r.ok) break;
           await sleep(700);
         }
-        if (!ok) { setStatus("vib", "WARN", "Perintah getar ditolak HP ini. Lihat Detail teknis getaran."); return; }
-        note("vib", "3 getaran terkirim. Terasa semuanya?");
+        if (!r.ok) { setStatus("vib", "WARN", `Perintah getar ditolak HP ini (jawaban HP: ${r.tried.join(" | ")}). Pakai Uji di layar HP.`); return; }
+        note("vib", "3 getaran terkirim. Terasa semuanya? Kalau tidak terasa, coba Uji di layar HP.");
       }
       setStatus("vib", "INFO");
       row("vib").querySelector(".mt-st").textContent = "Menunggu penilaian";
@@ -168,9 +212,9 @@ export function renderManualTests(root, { sh: rawSh, esc }) {
     async snd() {
       setStatus("snd", "INFO", "Memunculkan notifikasi…");
       const out = await sh('cmd notification post -S bigtext -t "Nexa Service Tool" nexa_test "Uji suara speaker"');
-      if (BAD.test(out)) { setStatus("snd", "WARN", "HP menolak perintah notifikasi. Uji suara lewat Mirror: putar video/nada dering."); return; }
+      if (BAD.test(out)) { setStatus("snd", "WARN", `HP menolak perintah notifikasi (jawaban HP: ${snippet(out, 120)}). Pakai Uji di layar HP.`); return; }
       row("snd").querySelector(".mt-st").textContent = "Menunggu penilaian";
-      note("snd", "Notifikasi terkirim. Terdengar bunyinya?");
+      note("snd", "Notifikasi terkirim. Terdengar bunyinya? Notifikasi sering senyap bila izin notifikasi shell dibatasi; kalau tidak terdengar, coba Uji di layar HP.");
       showConfirm("snd", true);
     },
 
@@ -215,16 +259,18 @@ export function renderManualTests(root, { sh: rawSh, esc }) {
       ];
       const results = [];
       let unsupported = false;
+      let lastOut = "";
       for (const [label, re] of keys) {
         setStatus("key", "INFO", `Tekan ${label} sekarang (8 detik)…`);
         const out = await sh("timeout 8 getevent -lq", 15000);
+        lastOut = out;
         if (/not found|inaccessible|permission denied|can't find|unknown option|usage/i.test(out)) { unsupported = true; break; }
         results.push([label, re.test(out)]);
       }
-      if (unsupported) { setStatus("key", "WARN", "HP ini tidak mengizinkan getevent lewat ADB. Uji tombol manual lewat Mirror."); return; }
+      if (unsupported) { setStatus("key", "WARN", `HP ini tidak mengizinkan getevent lewat ADB (jawaban HP: ${snippet(lastOut, 120)}). Uji tombol manual: pakai Mirror, lalu tekan tombol fisik dan lihat layar bereaksi.`); return; }
       if (results.every(([, ok]) => !ok)) {
         // Tidak satu tombol pun terbaca: bisa tombol rusak, bisa juga HP tidak mengirim event lewat ADB.
-        setStatus("key", "WARN", "Tidak ada tombol yang terbaca. Pastikan tombol benar-benar ditekan; kalau tetap kosong, HP ini mungkin tidak mengirim event tombol lewat ADB. Cek manual lewat Mirror.");
+        setStatus("key", "WARN", `Tidak ada tombol yang terbaca (keluaran HP: ${snippet(lastOut, 80)}). Pastikan tombol benar-benar ditekan; kalau tetap kosong, HP ini mungkin tidak mengirim event tombol lewat ADB. Cek manual: tekan Vol+/Vol− dan lihat slider volume muncul, tekan Power dan lihat layar mati.`);
         return;
       }
       const failed = results.filter(([, ok]) => !ok).map(([l]) => l);
@@ -243,13 +289,47 @@ export function renderManualTests(root, { sh: rawSh, esc }) {
       const ac = /AC powered: true/.test(raw);
       const wireless = /Wireless powered: true/.test(raw);
       if (usb || ac || wireless) setStatus("usb", "PASS", `Menerima daya (${[usb && "USB", ac && "AC", wireless && "Wireless"].filter(Boolean).join(", ")}).`);
-      else setStatus("usb", "WARN", "HP tidak menerima daya dari kabel. Coba kabel/port lain; kalau tetap, curiga port pengisian atau konektor rusak.");
+      else setStatus("usb", "WARN", "HP tidak menerima daya dari kabel. Coba kabel/port lain; kalau tetap, curiga port pengisian atau konektor rusak. Catatan: HP yang dicolok ke komputer lewat kabel data kadang hanya mengisi sangat pelan.");
     },
   };
+
+  const phout = () => root.querySelector("#phout");
 
   root.onclick = async (e) => {
     const btn = e.target.closest("button");
     if (!btn || busy) return;
+
+    // --- kartu "Uji langsung di HP" ---
+    if (btn.dataset.ph != null || btn.dataset.set || btn.dataset.sleep) {
+      lock(true);
+      const out = phout();
+      try {
+        out.textContent = "Memeriksa koneksi ke HP…";
+        await ensureLink();
+        if (btn.dataset.ph != null) {
+          const o = await openOnPhone(btn.dataset.ph);
+          out.textContent = o.failed
+            ? `HP tidak bisa membuka browser (jawaban HP: ${o.reply}). Buka alamat ini di browser HP: ${o.url}`
+            : `Halaman uji dibuka di HP: ${o.url}. Kalau tidak muncul, pastikan layar HP terbuka kunci dan HP punya internet.`;
+        } else if (btn.dataset.set) {
+          const action = SETTINGS[btn.dataset.set];
+          if (!action) return;
+          const r = await sh(`am start -a ${action}`);
+          out.textContent = BAD.test(r)
+            ? `HP menolak membuka layar itu (jawaban HP: ${snippet(r, 120)}). Buka manual lewat Pengaturan.`
+            : "Layar pengaturan dibuka di HP.";
+        } else {
+          await sh("input keyevent 223");
+          out.textContent = "Layar dimatikan. Tempelkan jari terdaftar ke sensor; layar harus menyala dan terbuka.";
+        }
+      } catch (err) {
+        out.textContent = `Gagal: ${err?.message || err}`;
+      } finally {
+        lock(false);
+      }
+      return;
+    }
+
     if (btn.id === "vibinfoBtn") {
       lock(true);
       const pre = root.querySelector("#vibinfo");
@@ -270,6 +350,31 @@ export function renderManualTests(root, { sh: rawSh, esc }) {
       return;
     }
     const action = btn.dataset.a;
+
+    // --- "Uji di layar HP": uji berjalan di browser HP, hasilnya dinilai di sini ---
+    if (action === "phone" && PHONE_HASH[id]) {
+      lock(true);
+      showConfirm(id, false);
+      try {
+        setStatus(id, "INFO", "Membuka halaman uji di HP…");
+        await ensureLink();
+        const o = await openOnPhone(PHONE_HASH[id]);
+        if (o.failed) {
+          setStatus(id, "WARN", `HP tidak bisa membuka browser (jawaban HP: ${o.reply}). Buka alamat ini di browser HP: ${o.url}`);
+        } else {
+          row(id).querySelector(".mt-st").className = "mt-st info";
+          row(id).querySelector(".mt-st").textContent = "Uji di HP";
+          note(id, "Halaman uji dibuka di HP. Ketuk tombol uji di layar HP, lalu nilai hasilnya di sini.");
+          showConfirm(id, true);
+        }
+      } catch (err) {
+        setStatus(id, "WARN", `Gagal: ${err?.message || err}`);
+      } finally {
+        lock(false);
+      }
+      return;
+    }
+
     if (!action || !RUN[id]) return;
     lock(true);
     showConfirm(id, false);
