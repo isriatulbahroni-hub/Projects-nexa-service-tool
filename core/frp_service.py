@@ -153,7 +153,11 @@ def detect_frp_service_state(
     adb_state = devices.get(serial, "not_detected")
     authorized = adb_state == "device"
 
-    fastboot_devices = fastboot_fn()
+    try:
+        fastboot_devices = fastboot_fn()
+    except FastbootError:
+        # fastboot tidak terpasang / error: perlakukan sebagai tidak ada device fastboot.
+        fastboot_devices = []
     fastboot_connected = serial in fastboot_devices
 
     fastboot_vars: dict[str, str] = {}

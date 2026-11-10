@@ -4,8 +4,9 @@ from pathlib import Path
 
 SOURCE_ROOT = Path(__file__).resolve().parent.parent
 
-ADB_PATH = Path.home() / "platform-tools" / "platform-tools" / "adb.exe"
-FASTBOOT_PATH = Path.home() / "platform-tools" / "platform-tools" / "fastboot.exe"
+_EXE = ".exe" if os.name == "nt" else ""
+ADB_PATH = Path.home() / "platform-tools" / "platform-tools" / f"adb{_EXE}"
+FASTBOOT_PATH = Path.home() / "platform-tools" / "platform-tools" / f"fastboot{_EXE}"
 
 
 def _app_data_root() -> Path:
