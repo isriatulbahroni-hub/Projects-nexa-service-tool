@@ -13,6 +13,27 @@ const FIELDS = ["customer", "phone", "model", "imei", "serial", "status", "compl
 const TEST_ORDER = ["battery", "storage", "sensor", "camera", "audio", "display", "touch"];
 const TEST_LABEL = { PASS: "Normal", WARN: "Perlu dicek", FAIL: "Bermasalah", INFO: "Info" };
 
+// Foto hanya boleh berupa data URL gambar (hasil shrink() di bawah). Data dari file cadangan atau
+// penyimpanan tidak dipercaya: nilai lain (mis. berisi tanda kutip atau "javascript:") ditolak,
+// supaya tidak bisa menyisipkan atribut/script ke <img> di halaman ini maupun di laporan cetak.
+const PHOTO_RE = /^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
+const safePhoto = (s) => typeof s === "string" && s.length <= 400000 && PHOTO_RE.test(s);
+
+// Bersihkan satu tiket dari file cadangan: hanya field yang dikenal, semuanya string pendek,
+// status harus salah satu STATUSES, foto lolos safePhoto. Mengembalikan null kalau bukan tiket.
+function cleanTicket(t) {
+  if (!t || typeof t !== "object" || typeof t.id !== "string" || !t.id.trim()) return null;
+  const out = { id: t.id.trim().slice(0, 40), createdAt: Number(t.createdAt) || 0, updatedAt: Number(t.updatedAt) || 0 };
+  for (const n of FIELDS) if (t[n] != null) out[n] = String(t[n]).slice(0, 4000);
+  if (out.status != null && !STATUSES.includes(out.status)) out.status = "Diterima";
+  const ph = t.photos && typeof t.photos === "object" ? t.photos : {};
+  out.photos = {
+    before: (Array.isArray(ph.before) ? ph.before : []).filter(safePhoto).slice(0, MAX_PHOTOS),
+    after: (Array.isArray(ph.after) ? ph.after : []).filter(safePhoto).slice(0, MAX_PHOTOS),
+  };
+  return out;
+}
+
 const loadTickets = () => {
   try { const v = JSON.parse(localStorage.getItem(KEY)); return Array.isArray(v) ? v : []; } catch { return []; }
 };
@@ -61,8 +82,11 @@ export function reportHtml(t, shop) {
   const pick = (re) => [...snaps].reverse().find((s) => re.test(String(s.tag || "")));
   const before = pick(/before|sebelum/i);
   const after = pick(/after|sesudah/i);
-  const gallery = (kind, label) => (t.photos && t.photos[kind] && t.photos[kind].length
-    ? `<div class="pg"><h3>${label}</h3><div class="pgrid">${t.photos[kind].map((s) => `<img src="${s}" alt="">`).join("")}</div></div>` : "");
+  const gallery = (kind, label) => {
+    const imgs = (t.photos && Array.isArray(t.photos[kind]) ? t.photos[kind] : []).filter(safePhoto);
+    return imgs.length
+      ? `<div class="pg"><h3>${label}</h3><div class="pgrid">${imgs.map((s) => `<img src="${esc(s)}" alt="">`).join("")}</div></div>` : "";
+  };
   const garansi = Number(t.warranty) > 0
     ? `Garansi servis ${Number(t.warranty)} hari sejak tanggal selesai, berlaku untuk pekerjaan dan suku cadang yang tercantum di atas.`
     : "Tanpa garansi servis.";
@@ -184,13 +208,14 @@ export async function renderService(view, { sh, getId, connected }) {
       const box = $(`#ph-${kind}`);
       const label = kind === "before" ? "sebelum" : "sesudah";
       box.innerHTML = cur.photos[kind].length
-        ? cur.photos[kind].map((src, i) => `<figure><img src="${src}" alt="Foto ${label} ${i + 1}" /><button type="button" class="x" data-rm="${kind}:${i}" aria-label="Hapus foto ${label} ${i + 1}">×</button></figure>`).join("")
+        ? cur.photos[kind].map((src, i) => `<figure><img src="${esc(src)}" alt="Foto ${label} ${i + 1}" /><button type="button" class="x" data-rm="${kind}:${i}" aria-label="Hapus foto ${label} ${i + 1}">×</button></figure>`).join("")
         : `<p class="muted">Belum ada foto.</p>`;
     }
   };
   const collect = () => { for (const n of FIELDS) cur[n] = f(n).value.trim(); return cur; };
   const fill = (t) => {
-    cur = { ...blank(getId()), ...t, photos: { before: [...((t.photos && t.photos.before) || [])], after: [...((t.photos && t.photos.after) || [])] } };
+    const ph = (k) => (t.photos && Array.isArray(t.photos[k]) ? t.photos[k] : []).filter(safePhoto);
+    cur = { ...blank(getId()), ...t, photos: { before: ph("before"), after: ph("after") } };
     for (const n of FIELDS) f(n).value = cur[n] == null ? "" : cur[n];
     $("#fb").value = "";
     $("#fa").value = "";
@@ -284,8 +309,10 @@ export async function renderService(view, { sh, getId, connected }) {
       if (!Array.isArray(incoming)) throw new Error("format");
       const map = new Map(loadTickets().map((t) => [t.id, t]));
       let added = 0;
-      for (const t of incoming) {
-        if (!t || typeof t.id !== "string") continue;
+      for (const raw of incoming) {
+        // isi file cadangan tidak dipercaya: hanya field dikenal yang masuk, foto divalidasi
+        const t = cleanTicket(raw);
+        if (!t) continue;
         const old = map.get(t.id);
         if (!old || (t.updatedAt || 0) > (old.updatedAt || 0)) { map.set(t.id, t); added++; }
       }
