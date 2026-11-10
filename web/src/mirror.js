@@ -13,6 +13,7 @@ import "./mirror.css";
 import { AdbScrcpyClient, AdbScrcpyOptions5_0_1 } from "@yume-chan/adb-scrcpy";
 import { DefaultServerPath } from "@yume-chan/scrcpy";
 import { BitmapVideoFrameRenderer, WebCodecsVideoDecoder } from "@yume-chan/scrcpy-decoder-webcodecs";
+import { SCRCPY_SERVER_SHA256, sha256Hex } from "./verify.js";
 
 const SCRCPY_SERVER_URL = "/scrcpy-server.bin";
 const PROFILE_KEY = "nexa-mirror-profile";
@@ -70,14 +71,28 @@ export function closeMirrorSync() {
 // Unduh server scrcpy sekali saja (cache di memori + cache browser)
 // ---------------------------------------------------------------
 let serverPromise = null;
+
+async function loadServerBytes(cache) {
+  const res = await fetch(SCRCPY_SERVER_URL, { cache });
+  if (!res.ok) throw new Error(`File server scrcpy tidak ditemukan (${res.status}).`);
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  // jar = zip, harus diawali "PK"
+  if (!(bytes[0] === 0x50 && bytes[1] === 0x4b)) throw new Error("File server scrcpy tidak valid.");
+  return bytes;
+}
+
 export function prefetchServer() {
   if (!serverPromise) {
     serverPromise = (async () => {
-      const res = await fetch(SCRCPY_SERVER_URL, { cache: "force-cache" });
-      if (!res.ok) throw new Error(`File server scrcpy tidak ditemukan (${res.status}).`);
-      const bytes = new Uint8Array(await res.arrayBuffer());
-      // jar = zip, harus diawali "PK"
-      if (!(bytes[0] === 0x50 && bytes[1] === 0x4b)) throw new Error("File server scrcpy tidak valid.");
+      // File ini dikirim dan DIJALANKAN di HP pelanggan, jadi isinya harus persis rilis resmi
+      // (SHA-256 yang sama dengan skrip build). Kalau cache browser berisi versi lain, ambil ulang dari jaringan.
+      let bytes = await loadServerBytes("force-cache");
+      if ((await sha256Hex(bytes)) !== SCRCPY_SERVER_SHA256) {
+        bytes = await loadServerBytes("reload");
+        if ((await sha256Hex(bytes)) !== SCRCPY_SERVER_SHA256) {
+          throw new Error("Checksum server scrcpy tidak cocok dengan rilis resmi; file ditolak.");
+        }
+      }
       return bytes;
     })().catch((e) => {
       serverPromise = null; // boleh dicoba lagi
@@ -126,6 +141,13 @@ async function remoteSize(sh, path) {
   const out = await sh(`ls -l ${path} 2>/dev/null`);
   const m = out.match(/\s(\d+)\s+\d{4}-\d{2}-\d{2}/);
   return m ? Number(m[1]) : null;
+}
+
+// SHA-256 file di HP. null = HP tidak punya `sha256sum` atau file tidak terbaca (tidak bisa diverifikasi).
+async function remoteSha256(sh, path) {
+  const out = await sh(`sha256sum ${path} 2>/dev/null`);
+  const m = out.trim().match(/^([0-9a-f]{64})\b/i);
+  return m ? m[1].toLowerCase() : null;
 }
 
 // Jalur utama: `head -c <ukuran> > file`. Proses di HP berhenti sendiri tepat setelah <ukuran> byte,
@@ -327,8 +349,14 @@ export function renderMirror(view, { sh, getAdb, helpHtml }) {
       lap("siapkan");
       if (!alive()) return;
 
-      // 2) kirim server hanya kalau belum ada di HP
-      if (existing === server.length) {
+      // 2) kirim server hanya kalau belum ada di HP: ukuran harus sama DAN, kalau HP bisa menghitung
+      //    SHA-256 (sha256sum), checksum-nya harus cocok. File berukuran sama tapi isinya beda tidak dipercaya.
+      let upToDate = existing === server.length;
+      if (upToDate) {
+        const remoteHash = await withTimeout(remoteSha256(sh, DefaultServerPath), 6000, "HP tidak merespons (cek checksum).").catch(() => null);
+        if (remoteHash && remoteHash !== SCRCPY_SERVER_SHA256) upToDate = false;
+      }
+      if (upToDate) {
         setStep("Server sudah ada di HP, lewati pengiriman");
         lap("kirim (lewati)");
       } else {
@@ -356,6 +384,11 @@ export function renderMirror(view, { sh, getAdb, helpHtml }) {
           60000,
           "Pengiriman server ke HP macet (USB tidak merespons). Cabut dan colok kabel USB (pakai kabel data & port langsung, bukan hub), tutup aplikasi lain yang memakai ADB (adb.exe, scrcpy, Android Studio), lalu Hubungkan ulang.",
         );
+        // pastikan file yang sampai di HP persis sama (kalau HP punya sha256sum)
+        const sentHash = await withTimeout(remoteSha256(sh, DefaultServerPath), 6000, "HP tidak merespons (cek checksum).").catch(() => null);
+        if (sentHash && sentHash !== SCRCPY_SERVER_SHA256) {
+          throw new Error("Checksum server di HP tidak cocok setelah dikirim (file rusak atau terpotong). Cabut dan colok kabel USB, lalu coba lagi.");
+        }
       }
       if (!alive()) return;
 
