@@ -16,9 +16,10 @@ from typing import Callable, Optional
 
 from .adb import run_adb, reboot_device, ADBError
 from . import packages, file_explorer
+from .config import DATA_DIR
 
 
-MACROS_DIR = Path(__file__).resolve().parent.parent / "data" / "macros"
+MACROS_DIR = DATA_DIR / "macros"
 
 
 class MacroError(RuntimeError):

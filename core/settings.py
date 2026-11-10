@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import secrets
 from pathlib import Path
 from threading import RLock
 from typing import Any
 
-from .config import PROJECT_ROOT
+from .config import DATA_DIR
 
-SETTINGS_PATH = PROJECT_ROOT / "data" / "settings.json"
+SETTINGS_PATH = DATA_DIR / "settings.json"
 DEFAULTS: dict[str, Any] = {
     "auto_refresh_ms": 1500,
     "log_level": "INFO",
@@ -104,6 +105,8 @@ class SettingsStore:
 
     # ------------------------------------------------------------------
     # PIN untuk kunci halaman Settings
+    # CATATAN: ini kunci tampilan (UI), bukan keamanan sungguhan. Hash tersimpan
+    # di settings.json yang bisa diedit siapa pun yang punya akses ke komputer.
     # ------------------------------------------------------------------
     @staticmethod
     def _hash_pin(pin: str, salt: str) -> str:
@@ -129,4 +132,4 @@ class SettingsStore:
         stored_hash = self.get("settings_pin_hash", "")
         if not salt or not stored_hash:
             return False
-        return self._hash_pin(pin, salt) == stored_hash
+        return hmac.compare_digest(self._hash_pin(pin, salt), stored_hash)
