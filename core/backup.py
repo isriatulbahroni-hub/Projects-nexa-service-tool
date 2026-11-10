@@ -1,3 +1,6 @@
+import os
+import re
+import shutil
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -20,8 +23,36 @@ DEFAULT_BACKUP_TARGETS = [
 ]
 
 
+# Batas waktu `adb pull` per folder. Foto/WhatsApp bisa puluhan GB, jadi 10
+# menit terlalu pendek dan memotong backup tanpa terasa.
+PULL_TIMEOUT_SECONDS = 3600
+
+
 class BackupError(RuntimeError):
     pass
+
+
+def _safe_name(value: str) -> str:
+    """Serial ADB Wi-Fi berbentuk '192.168.1.5:5555'. Tanda ':' (dan karakter
+    lain) tidak valid untuk nama file/folder di Windows."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", value) or "device"
+
+
+def errors_file_for(zip_path: Path) -> Path:
+    """Lokasi catatan peringatan/error untuk sebuah file backup ZIP."""
+    zip_path = Path(zip_path)
+    return zip_path.with_name(zip_path.stem + "_errors.txt")
+
+
+def read_backup_warnings(zip_path: Path) -> list[str]:
+    """Baca peringatan backup (kalau ada) supaya UI bisa menampilkannya."""
+    path = errors_file_for(zip_path)
+    if not path.exists():
+        return []
+    try:
+        return [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except OSError:
+        return []
 
 
 def backup_device(
@@ -30,6 +61,7 @@ def backup_device(
     targets: list[str] | None = None,
     progress_callback: Callable[[int, int, str], None] | None = None,
     password: str | None = None,
+    pull_timeout: int = PULL_TIMEOUT_SECONDS,
 ) -> Path:
     """Backup folder penting device ke ZIP. Kalau `password` diisi, ZIP-nya
     dienkripsi AES-256 (pakai pyzipper) - PENTING karena isi backup (foto,
@@ -45,7 +77,9 @@ def backup_device(
     targets = targets or DEFAULT_BACKUP_TARGETS
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    staging_dir = output_dir / f"backup_{serial}_{timestamp}"
+    safe_serial = _safe_name(serial)
+    output_dir = Path(output_dir)
+    staging_dir = output_dir / f"backup_{safe_serial}_{timestamp}"
     staging_dir.mkdir(parents=True, exist_ok=True)
 
     errors = []
@@ -64,7 +98,7 @@ def backup_device(
             continue
 
         try:
-            run_adb("-s", serial, "pull", target, str(local_target), timeout=600)
+            run_adb("-s", serial, "pull", target, str(local_target), timeout=pull_timeout)
         except ADBError as exc:
             errors.append(f"{target}: {exc}")
 
@@ -75,31 +109,46 @@ def backup_device(
             if not is_device_connected(serial):
                 device_lost = True
 
-    zip_path = output_dir / f"backup_{serial}_{timestamp}.zip"
-
-    if password:
-        with pyzipper.AESZipFile(
-            zip_path, "w", compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES
-        ) as zf:
-            zf.setpassword(password.encode("utf-8"))
-            for file_path in staging_dir.rglob("*"):
-                if file_path.is_file():
-                    zf.write(file_path, file_path.relative_to(staging_dir))
-    else:
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for file_path in staging_dir.rglob("*"):
-                if file_path.is_file():
-                    zf.write(file_path, file_path.relative_to(staging_dir))
+    zip_path = output_dir / f"backup_{safe_serial}_{timestamp}.zip"
+    if errors:
+        # Nama file ikut menandai: dialog "Backup Selesai" di UI menampilkan path-nya,
+        # jadi teknisi langsung melihat backup ini tidak lengkap.
+        zip_path = output_dir / f"backup_{safe_serial}_{timestamp}_TIDAK_LENGKAP.zip"
 
     if device_lost:
         errors.append(
             "PERINGATAN: device terputus sebelum semua folder selesai di-backup. "
             "Hasil backup ini KEMUNGKINAN TIDAK LENGKAP."
         )
+    elif errors:
+        errors.append(
+            f"PERINGATAN: {len(errors)} folder gagal atau terpotong (mis. timeout). "
+            "Hasil backup ini KEMUNGKINAN TIDAK LENGKAP."
+        )
 
-    if errors:
-        error_log = staging_dir / "backup_errors.txt"
-        error_log.write_text("\n".join(errors), encoding="utf-8")
+    try:
+        if errors:
+            # Disimpan di dalam ZIP (ikut terbawa) dan di samping ZIP (mudah dibaca UI).
+            (staging_dir / "backup_errors.txt").write_text("\n".join(errors), encoding="utf-8")
+            errors_file_for(zip_path).write_text("\n".join(errors), encoding="utf-8")
+
+        if password:
+            with pyzipper.AESZipFile(
+                zip_path, "w", compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES
+            ) as zf:
+                zf.setpassword(password.encode("utf-8"))
+                for file_path in staging_dir.rglob("*"):
+                    if file_path.is_file():
+                        zf.write(file_path, file_path.relative_to(staging_dir))
+        else:
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for file_path in staging_dir.rglob("*"):
+                    if file_path.is_file():
+                        zf.write(file_path, file_path.relative_to(staging_dir))
+    finally:
+        # Salinan polos (foto, chat) TIDAK boleh tertinggal di disk: kalau tidak,
+        # enkripsi AES pada ZIP tidak ada gunanya.
+        shutil.rmtree(staging_dir, ignore_errors=True)
 
     return zip_path
 
@@ -161,7 +210,12 @@ def restore_device(
                 continue
 
             try:
-                run_adb("-s", serial, "push", str(item), remote_target, timeout=600)
+                # "folder/." mendorong ISI folder ke tujuan. Tanpa ini, kalau
+                # /sdcard/DCIM sudah ada, adb membuat /sdcard/DCIM/DCIM.
+                run_adb(
+                    "-s", serial, "push", os.path.join(str(item), "."), remote_target,
+                    timeout=PULL_TIMEOUT_SECONDS,
+                )
                 results.append(f"OK: {item.name} -> {remote_target}")
             except ADBError as exc:
                 results.append(f"GAGAL: {item.name} - {exc}")
@@ -180,10 +234,11 @@ def restore_device(
 def _validate_zip_members(namelist: list[str], extract_root: Path) -> None:
     """Guard 'zip slip' (path traversal) - tolak entry yang mencoba keluar
     dari folder tujuan ekstrak sebelum ekstrak apapun."""
-    root = str(extract_root.resolve())
+    root = extract_root.resolve()
     for member in namelist:
         member_path = (extract_root / member).resolve()
-        if not str(member_path).startswith(root):
+        # is_relative_to (bukan startswith string): '/tmp/abc_evil' bukan anak dari '/tmp/abc'.
+        if member_path != root and not member_path.is_relative_to(root):
             raise ValueError(f"File ZIP mencurigakan (path traversal): {member}")
 
 
