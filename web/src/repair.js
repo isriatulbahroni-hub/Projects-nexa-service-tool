@@ -185,6 +185,8 @@ export async function renderRepair(view, ctx) {
   };
   const needPath = (p) => {
     if (!PATH_RE.test(p)) throw new Error("Path harus di /sdcard dan tanpa karakter khusus (kutip, $, ;, |, &, dll.).");
+    // PATH_RE mengizinkan titik, jadi "/sdcard/../data" lolos regex; tolak segmen ".." dan ".".
+    if (p.split("/").some((seg) => seg === ".." || seg === ".")) throw new Error("Path tidak boleh memuat '..' atau '.'.");
     return p.replace(/\/+$/, "");
   };
 
@@ -321,7 +323,7 @@ export async function renderRepair(view, ctx) {
   });
 
   // --- daftar paket untuk autocomplete ---------------------------------
-  sh("pm list packages -3").then((t) => {
+  sh("pm list packages -3").catch(() => "").then((t) => {
     const dl = q("#pkgs");
     if (!dl) return;
     dl.innerHTML = t.split("\n").map((l) => l.replace("package:", "").trim()).filter(Boolean).sort()
@@ -435,9 +437,19 @@ export async function renderRepair(view, ctx) {
       if (!(await confirmRisk("mid", `Backup ${path}`, `Ukuran sekitar ${fmtSize(kb * 1024)}. Hasil berupa file .tar; ${window.showSaveFilePicker ? "kamu akan memilih lokasi simpan" : "disimpan lewat unduhan browser"}.`))) return;
       const fname = `backup-${name}-${new Date().toISOString().slice(0, 10)}.tar`;
       stat("Menyiapkan…");
-      const total = await streamToFile(`tar -cf - -C ${shq(parent)} ${shq(name)} 2>/dev/null`, fname, (n) => stat(`Terunduh ${fmtSize(n)}…`));
-      stat(`Selesai: ${fname} (${fmtSize(total)})`);
-      addLog(`Backup ${path}`, true, `${fname}, ${fmtSize(total)}`);
+      // stderr tar disimpan di HP supaya file yang gagal dibaca tidak lolos diam-diam.
+      const ERR = "/data/local/tmp/nexa-backup.err";
+      await sh(`rm -f ${ERR}`);
+      const total = await streamToFile(`tar -cf - -C ${shq(parent)} ${shq(name)} 2>${ERR}`, fname, (n) => stat(`Terunduh ${fmtSize(n)}…`));
+      const tarErr = (await sh(`cat ${ERR} 2>/dev/null; rm -f ${ERR}`)).trim();
+      if (tarErr) {
+        const lines = tarErr.split("\n");
+        stat(`Selesai dengan peringatan: ${fname} (${fmtSize(total)}). ${lines.length} pesan error dari tar; backup KEMUNGKINAN TIDAK LENGKAP, lihat log.`);
+        addLog(`Backup ${path}`, false, `${fname}, ${fmtSize(total)}. KEMUNGKINAN TIDAK LENGKAP:\n${lines.slice(0, 8).join("\n")}`);
+      } else {
+        stat(`Selesai: ${fname} (${fmtSize(total)})`);
+        addLog(`Backup ${path}`, true, `${fname}, ${fmtSize(total)}`);
+      }
     } catch (e) {
       stat("Gagal: " + (e.message || e));
       addLog("Backup folder", false, e.message || e);
@@ -449,14 +461,34 @@ export async function renderRepair(view, ctx) {
   // --- cari file besar ---------------------------------------------------
   q("#scan").onclick = async () => {
     const box = q("#large");
+    const btn = q("#scan");
+    btn.disabled = true;
     box.innerHTML = `<p class="muted">Mencari… (bisa agak lama)</p>`;
-    // /sdcard adalah symlink; find tidak mengikutinya, jadi pakai path aslinya.
-    const out = await sh("find /storage/emulated/0 -type f -size +20M -exec ls -l {} + 2>/dev/null");
-    const rows = out.split("\n").map((l) => {
-      const p = l.trim().split(/\s+/);
-      if (p.length < 8 || !p[0].startsWith("-")) return null;
-      return { size: Number(p[4]), path: p.slice(7).join(" ") };
-    }).filter((r) => r && r.size > 0 && r.path.startsWith("/")).sort((a, b) => b.size - a.size).slice(0, 30);
+    let rows;
+    try {
+      // /sdcard adalah symlink; find tidak mengikutinya, jadi pakai path aslinya.
+      // stat '%s %n' memberi ukuran + path PERSIS (ls -l menggabungkan spasi ganda di nama file,
+      // sehingga tombol "hapus" bisa menunjuk file lain).
+      let out = await sh("find /storage/emulated/0 -type f -size +20M -exec stat -c '%s %n' {} + 2>/dev/null");
+      rows = out.split("\n").map((l) => {
+        const m = l.match(/^(\d+) (\/.+)$/);
+        return m ? { size: Number(m[1]), path: m[2] } : null;
+      }).filter(Boolean);
+      if (!rows.length) {
+        out = await sh("find /storage/emulated/0 -type f -size +20M -exec ls -l {} + 2>/dev/null");
+        rows = out.split("\n").map((l) => {
+          const p = l.trim().split(/\s+/);
+          if (p.length < 8 || !p[0].startsWith("-")) return null;
+          return { size: Number(p[4]), path: p.slice(7).join(" ") };
+        }).filter(Boolean);
+      }
+    } catch (e) {
+      box.innerHTML = `<p class="fail">Gagal mencari file: ${esc(e.message || e)}</p>`;
+      return;
+    } finally {
+      btn.disabled = false;
+    }
+    rows = rows.filter((r) => r.size > 0 && r.path.startsWith("/")).sort((a, b) => b.size - a.size).slice(0, 30);
     if (!rows.length) { box.innerHTML = `<p class="muted">Tidak ada file besar (&gt; 20 MB) atau tidak ada izin baca.</p>`; return; }
     box.innerHTML = `<table>${rows.map((r, i) => `<tr><td>${esc(r.path)}</td><td class="muted">${fmtSize(r.size)}</td>
       <td><span class="link" data-dl="${i}">unduh</span> · <span class="link" data-rm="${i}">hapus</span></td></tr>`).join("")}</table>`;
