@@ -1,8 +1,10 @@
 // Kirim file ke HP (halaman File) dan tombol Tempel clipboard di panel Mirror.
-import { esc } from "./kit.js";
+import { esc, sq } from "./kit.js";
 
 const SAFE = /[^A-Za-z0-9._()-]/g;
 const DIR_OK = /^\/(sdcard|storage\/emulated\/0)(\/[A-Za-z0-9._ ()-]+)*$/;
+// Segmen "." atau ".." lolos regex di atas (titik diizinkan), jadi ditolak terpisah.
+const dirOk = (p) => DIR_OK.test(p) && !p.split("/").some((seg) => seg === "." || seg === "..");
 const fmt = (n) => (n >= 1024 ** 3 ? (n / 1024 ** 3).toFixed(2) + " GB" : n >= 1024 ** 2 ? (n / 1024 ** 2).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB");
 
 async function readAll(stream) {
@@ -19,7 +21,7 @@ async function readAll(stream) {
 // Kirim sebagai satu aliran ke `head -c <ukuran> > file`. Proses di HP berhenti sendiri setelah
 // ukuran terpenuhi, jadi stdin tidak perlu ditutup (menutup stdin menutup seluruh socket ADB).
 async function sendFile(adb, sh, file, path, onProgress) {
-  const q = `"${path}"`;
+  const q = sq(path);
   if (file.size === 0) { await sh(`: > ${q}`); return; }
   const proc = await adb.subprocess.noneProtocol.spawn(`head -c ${file.size} > ${q}`);
   const finished = readAll(proc.output).catch(() => 0);
@@ -65,7 +67,7 @@ export function renderTransfer(box, { getAdb, sh, dir }) {
   if (!box) return;
   const dirs = ["/sdcard/Download", "/sdcard/DCIM", "/sdcard/Documents", "/sdcard/Pictures", "/sdcard/Music"];
   const here = String(dir || "").replace(/\/$/, "");
-  if (DIR_OK.test(here) && !dirs.includes(here)) dirs.unshift(here);
+  if (dirOk(here) && !dirs.includes(here)) dirs.unshift(here);
   box.innerHTML = `
     <div class="card"><h2>Kirim file ke HP</h2>
       <p class="muted">Kirim file dari perangkat ini ke penyimpanan HP lewat USB. Nama file dirapikan: spasi dan simbol diganti garis bawah.</p>
@@ -81,8 +83,11 @@ export function renderTransfer(box, { getAdb, sh, dir }) {
     if (!adb) return stat("HP belum terhubung.", "fail");
     if (!file) return stat("Pilih file dulu.", "warn");
     const name = file.name.replace(SAFE, "_");
-    const path = `${$("#xd").value}/${name}`;
-    const exists = (await sh(`stat -c %s "${path}" 2>/dev/null`)).trim();
+    if (!name || /^\.+$/.test(name)) return stat("Nama file tidak valid.", "fail");
+    const destDir = $("#xd").value;
+    if (!dirOk(destDir)) return stat("Folder tujuan tidak valid.", "fail");
+    const path = `${destDir}/${name}`;
+    const exists = (await sh(`stat -c %s ${sq(path)} 2>/dev/null`)).trim();
     if (/^\d+$/.test(exists) && !confirm(`${name} sudah ada di folder itu (${fmt(Number(exists))}). Timpa?`)) return;
     const btn = $("#xg");
     const bar = box.querySelector(".pbar");

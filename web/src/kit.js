@@ -3,6 +3,9 @@
 export const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
+// Kutip tunggal: aman untuk karakter apa pun ($, `, ;, spasi, dll.) di sh.
+export const sq = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
+
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export const num = (v) => {
