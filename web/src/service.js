@@ -44,12 +44,25 @@ const rupiah = (n) => "Rp " + (Number(String(n ?? "").replace(/\D/g, "")) || 0).
 const tgl = (t) => new Date(t).toLocaleString("id-ID", { dateStyle: "long", timeStyle: "short" });
 const tglPendek = (t) => new Date(t).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" });
 
+function randSuffix() {
+  const a = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const buf = new Uint8Array(3);
+  crypto.getRandomValues(buf);
+  return [...buf].map((b) => a[b % a.length]).join("");
+}
+
+// Akhiran acak 3 karakter mencegah dua perangkat (PC dan HP) membuat nomor yang sama di hari yang sama,
+// yang sebelumnya bisa saling menimpa saat impor cadangan. Nomor lama (tanpa akhiran) tetap valid.
 function newId(list) {
   const d = new Date();
   const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
   let n = list.filter((t) => String(t.id).startsWith(`NX-${ymd}`)).length + 1;
-  while (list.some((t) => t.id === `NX-${ymd}-${String(n).padStart(3, "0")}`)) n++;
-  return `NX-${ymd}-${String(n).padStart(3, "0")}`;
+  let id;
+  do {
+    id = `NX-${ymd}-${String(n).padStart(3, "0")}-${randSuffix()}`;
+    n++;
+  } while (list.some((t) => t.id === id));
+  return id;
 }
 
 const blank = (serial) => ({
@@ -314,6 +327,13 @@ export async function renderService(view, { sh, getId, connected }) {
         const t = cleanTicket(raw);
         if (!t) continue;
         const old = map.get(t.id);
+        // ID sama tapi waktu dibuat berbeda = tiket lain dari perangkat lain (nomor bentrok): simpan keduanya.
+        if (old && old.createdAt && t.createdAt && old.createdAt !== t.createdAt) {
+          t.id = newId([...map.values()]);
+          map.set(t.id, t);
+          added++;
+          continue;
+        }
         if (!old || (t.updatedAt || 0) > (old.updatedAt || 0)) { map.set(t.id, t); added++; }
       }
       if (!saveTickets([...map.values()])) throw new Error("penuh");
